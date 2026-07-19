@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+/*
+  Feasible — Brooke Team house style: editorial, no emoji, inkwell navy +
+  antique gold + linen. System font stacks (no webfont fetch). Verdict accents
+  (feasible / warn / not-feasible) are the app-specific addition — the go/no-go
+  signal is the core visual payload.
+*/
+@theme {
+  --color-linen: #f4efe4;
+  --color-parchment: #fbf8f1;
+  --color-ink: #1b2a44;
+  --color-ink-soft: #46536b;
+  --color-gold: #b08a46;
+  --color-gold-deep: #8c6d34;
+  --color-line: #e6dfd0;
+  --color-muted: #736c5c;
+
+  /* verdict palette */
+  --color-pass: #2f6b4f;
+  --color-warn: #b08a46;
+  --color-fail: #b4371f;
+
+  --font-serif: "Iowan Old Style", "Palatino Linotype", "Palatino",
+    "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+}
+
+html {
+  height: 100%;
+  background: var(--color-linen);
+  color: var(--color-ink);
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-height: 100%;
+  font-family: var(--font-sans);
+  background-color: var(--color-linen);
+  background-image:
+    radial-gradient(1200px 600px at 100% -10%, rgba(176, 138, 70, 0.06), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(27, 42, 68, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+.font-display {
+  font-family: var(--font-serif);
+  letter-spacing: -0.01em;
+}
+
+/* Measurements read as figures, not prose. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
