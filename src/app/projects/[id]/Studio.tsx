@@ -26,8 +26,10 @@ import {
   saveZoning,
   proposeZoningFromPdf,
   proposeZoningFromSearch,
+  checkFlood,
   type ZoningInput,
 } from "./actions";
+import type { FloodReport } from "@/lib/flood";
 
 // Default frame: north-central CT, until a project has a center or a parcel.
 const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
@@ -712,6 +714,8 @@ export default function Studio({
           />
         ) : null}
 
+        <FloodCard projectId={projectId} />
+
         <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Setback checks</h3>
           {validations.length === 0 ? (
@@ -858,6 +862,12 @@ function ZoningCard({
   }
 
   async function onPdf(file: File) {
+    // Guard the Server Action body cap (16 MB; base64 is ~1.33× the raw file)
+    // and runaway token cost — nudge toward the relevant pages, not the whole code.
+    if (file.size > 11 * 1024 * 1024) {
+      setErr(`That PDF is ${(file.size / 1024 / 1024).toFixed(1)} MB — too large. Upload just the dimensional-standards / setback pages.`);
+      return;
+    }
     setAiBusy("pdf");
     setErr(null);
     setAiNote(null);
@@ -978,6 +988,67 @@ function ZoningCard({
       >
         {saving ? "Saving…" : "Confirm setbacks"}
       </button>
+    </section>
+  );
+}
+
+function FloodCard({ projectId }: { projectId: string }) {
+  const [report, setReport] = useState<FloodReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setErr(null);
+    const res = await checkFlood(projectId);
+    setBusy(false);
+    if (!res.ok || !res.report) {
+      setErr(res.error ?? "Flood lookup failed.");
+      return;
+    }
+    setReport(res.report);
+  }
+
+  return (
+    <section className="rounded-lg border border-line bg-white p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-display text-lg text-ink">Flood zone</h3>
+        <button
+          onClick={() => void run()}
+          disabled={busy}
+          className="rounded-md border border-line px-2.5 py-1 text-xs text-ink transition hover:border-gold disabled:opacity-50"
+        >
+          {busy ? "Checking…" : report ? "Re-check" : "Check flood zone"}
+        </button>
+      </div>
+      {err ? <p className="mt-2 text-xs text-fail">{err}</p> : null}
+      {report ? (
+        <div className="mt-3 space-y-1.5 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-ink">Zone {report.zone ?? "—"}</span>
+            <span
+              className={`rounded px-2 py-0.5 text-xs font-medium ${
+                report.sfha ? "bg-fail/10 text-fail" : "bg-pass/10 text-pass"
+              }`}
+            >
+              SFHA: {report.sfha == null ? "—" : report.sfha ? "In" : "Out"}
+            </span>
+          </div>
+          <p className="text-xs text-muted">{report.description}</p>
+          {report.staticBfe != null ? (
+            <p className="text-xs text-muted">Base flood elevation: {report.staticBfe} ft</p>
+          ) : null}
+          <p className="text-xs text-muted">
+            {report.panel ? `Panel ${report.panel}` : "Panel —"}
+            {report.panelDate ? ` · eff. ${report.panelDate}` : ""}
+          </p>
+          <p className="mt-1 text-xs italic text-muted/80">
+            FEMA NFHL — advisory only, not for regulatory use.
+          </p>
+        </div>
+      ) : !err ? (
+        <p className="mt-2 text-xs text-muted">Check the FEMA flood zone for this site.</p>
+      ) : null}
     </section>
   );
 }

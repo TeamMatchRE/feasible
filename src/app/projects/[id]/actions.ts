@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/session";
 import { sql } from "@/db";
 import { fetchParcelAt } from "@/lib/parcels";
 import { proposeFromPdf, proposeFromWebSearch, type ProposeResult } from "@/lib/zoning";
+import { fetchFloodAt, type FloodReport } from "@/lib/flood";
 import {
   RULES,
   HOUSE_IN_ENVELOPE,
@@ -230,6 +231,39 @@ async function projectLocale(projectId: string): Promise<{ address: string | nul
     if (stateIdx > 0) town = parts[stateIdx - 1] || null;
   }
   return { address, town };
+}
+
+export interface FloodResult {
+  ok: boolean;
+  report?: FloodReport;
+  error?: string;
+}
+
+/**
+ * FEMA flood-zone report for the study. Uses the parcel centroid when a parcel
+ * exists, else the project's map center. Advisory only; ephemeral (not stored).
+ */
+export async function checkFlood(projectId: string): Promise<FloodResult> {
+  try {
+    await assertOwner(projectId);
+    // Prefer the parcel centroid (4326); fall back to the project's saved center.
+    const [pt] = await sql<{ lat: number | null; lng: number | null }[]>`
+      with c as (
+        select st_transform(st_centroid(geom), 4326) as g
+        from feasible.parcels where project_id = ${projectId} limit 1
+      )
+      select
+        coalesce((select st_y(g) from c), (select center_lat from feasible.projects where id = ${projectId})) as lat,
+        coalesce((select st_x(g) from c), (select center_lng from feasible.projects where id = ${projectId})) as lng`;
+    if (!pt || pt.lat == null || pt.lng == null) {
+      return { ok: false, error: "Pull the parcel first (or set a location) so we know where to check." };
+    }
+    const report = await fetchFloodAt(Number(pt.lat), Number(pt.lng));
+    if (!report) return { ok: false, error: "No FEMA flood data at this location." };
+    return { ok: true, report };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Flood lookup failed." };
+  }
 }
 
 /** AI zoning lookup from an uploaded regs PDF (base64, no data: prefix). Proposal only — does NOT save. */
