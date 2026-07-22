@@ -24,6 +24,8 @@ import {
   setFrontageEdge,
   computeEnvelope,
   saveZoning,
+  proposeZoningFromPdf,
+  proposeZoningFromSearch,
   type ZoningInput,
 } from "./actions";
 
@@ -814,6 +816,70 @@ function ZoningCard({
   const [coverage, setCoverage] = useState(parcel.max_coverage_pct?.toString() ?? "");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState<"pdf" | "search" | null>(null);
+  const [aiNote, setAiNote] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function applyProposal(p: {
+    zoning_district: string | null;
+    front_setback_ft: number | null;
+    side_setback_ft: number | null;
+    rear_setback_ft: number | null;
+    max_coverage_pct: number | null;
+    citation: string | null;
+    confidence: string | null;
+    source_url: string | null;
+    notes: string | null;
+  }) {
+    if (p.zoning_district) setDistrict(p.zoning_district);
+    if (p.front_setback_ft != null) setFront(String(p.front_setback_ft));
+    if (p.side_setback_ft != null) setSide(String(p.side_setback_ft));
+    if (p.rear_setback_ft != null) setRear(String(p.rear_setback_ft));
+    if (p.max_coverage_pct != null) setCoverage(String(p.max_coverage_pct));
+    const bits = [
+      p.confidence ? `${p.confidence} confidence` : null,
+      p.citation ?? null,
+      p.notes ?? null,
+    ].filter(Boolean);
+    setAiNote(`Proposed — review before confirming.${bits.length ? " " + bits.join(" · ") : ""}`);
+  }
+
+  async function onSearch() {
+    setAiBusy("search");
+    setErr(null);
+    setAiNote(null);
+    const res = await proposeZoningFromSearch(projectId);
+    setAiBusy(null);
+    if (!res.ok || !res.proposal) {
+      setErr(res.error ?? "Search failed.");
+      return;
+    }
+    applyProposal(res.proposal);
+  }
+
+  async function onPdf(file: File) {
+    setAiBusy("pdf");
+    setErr(null);
+    setAiNote(null);
+    try {
+      const b64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+        r.onerror = () => reject(new Error("Could not read the file."));
+        r.readAsDataURL(file);
+      });
+      const res = await proposeZoningFromPdf(projectId, b64);
+      setAiBusy(null);
+      if (!res.ok || !res.proposal) {
+        setErr(res.error ?? "Could not read that PDF.");
+        return;
+      }
+      applyProposal(res.proposal);
+    } catch (e) {
+      setAiBusy(null);
+      setErr(e instanceof Error ? e.message : "Upload failed.");
+    }
+  }
 
   async function confirm() {
     setSaving(true);
@@ -853,8 +919,37 @@ function ZoningCard({
     <section className="rounded-lg border border-line bg-white p-4">
       <h3 className="font-display text-lg text-ink">Zoning &amp; setbacks</h3>
       <p className="mt-1 text-xs text-muted">
-        Enter the governing district&rsquo;s setbacks (or upload the town regs / search — coming next), then confirm. These drive the building envelope.
+        Upload the town regs or search for a draft, or type the values in — then confirm. These drive the building envelope.
       </p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/pdf"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void onPdf(f);
+            e.target.value = "";
+          }}
+        />
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={aiBusy !== null || saving}
+          className="rounded-md border border-gold bg-gold/10 px-2.5 py-1 text-xs font-medium text-gold-deep transition hover:bg-gold/20 disabled:opacity-50"
+        >
+          {aiBusy === "pdf" ? "Reading PDF…" : "Upload regs PDF"}
+        </button>
+        <button
+          onClick={() => void onSearch()}
+          disabled={aiBusy !== null || saving}
+          className="rounded-md border border-line px-2.5 py-1 text-xs text-ink transition hover:border-gold disabled:opacity-50"
+        >
+          {aiBusy === "search" ? "Searching…" : "Search online"}
+        </button>
+      </div>
+      {aiNote ? <p className="mt-2 text-xs text-gold-deep">{aiNote}</p> : null}
 
       <label className="mt-3 flex flex-col gap-1 text-xs text-muted">
         Zoning district

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/session";
 import { sql } from "@/db";
 import { fetchParcelAt } from "@/lib/parcels";
+import { proposeFromPdf, proposeFromWebSearch, type ProposeResult } from "@/lib/zoning";
 import {
   RULES,
   HOUSE_IN_ENVELOPE,
@@ -213,6 +214,43 @@ export async function deleteFeature(
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Delete failed." };
+  }
+}
+
+/** The project's address + a best-effort town (parsed from a "…, Town, CT …" address). */
+async function projectLocale(projectId: string): Promise<{ address: string | null; town: string | null }> {
+  const [p] = await sql<{ address: string | null }[]>`
+    select address from feasible.projects where id = ${projectId}`;
+  const address = p?.address ?? null;
+  let town: string | null = null;
+  if (address) {
+    // "21 Hidden Valley Trail, Canton, CT 06019" -> "Canton"
+    const parts = address.split(",").map((s) => s.trim());
+    const stateIdx = parts.findIndex((s) => /^(CT|MA|RI|Connecticut|Massachusetts|Rhode Island)\b/i.test(s));
+    if (stateIdx > 0) town = parts[stateIdx - 1] || null;
+  }
+  return { address, town };
+}
+
+/** AI zoning lookup from an uploaded regs PDF (base64, no data: prefix). Proposal only — does NOT save. */
+export async function proposeZoningFromPdf(projectId: string, pdfBase64: string): Promise<ProposeResult> {
+  try {
+    await assertOwner(projectId);
+    const { address, town } = await projectLocale(projectId);
+    return await proposeFromPdf(pdfBase64, town, address);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Zoning lookup failed." };
+  }
+}
+
+/** AI zoning lookup via web search. Proposal only — does NOT save. */
+export async function proposeZoningFromSearch(projectId: string): Promise<ProposeResult> {
+  try {
+    await assertOwner(projectId);
+    const { address, town } = await projectLocale(projectId);
+    return await proposeFromWebSearch(town, address);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Zoning search failed." };
   }
 }
 
