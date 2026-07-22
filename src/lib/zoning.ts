@@ -71,9 +71,11 @@ const ZONING_SCHEMA = {
   ],
 } as const;
 
+// A hard per-request timeout so a slow web search / large PDF surfaces an error
+// in the UI instead of hanging on the SDK's 10-minute default.
 function client(): Anthropic | null {
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  return new Anthropic();
+  return new Anthropic({ timeout: 90_000, maxRetries: 1 });
 }
 
 function promptFor(town: string | null, address: string | null): string {
@@ -88,16 +90,36 @@ function promptFor(town: string | null, address: string | null): string {
   ].join("");
 }
 
-/** Pull the first JSON object out of a text blob (web-search path fallback). */
+/**
+ * Pull the LAST balanced JSON object out of a text blob — the web-search reply
+ * is prose followed by the JSON object, so scan back from the final `}` to its
+ * matching `{` (brace-counting, string-aware).
+ */
 function extractJson(text: string): ZoningProposal | null {
-  const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(text.slice(start, end + 1)) as ZoningProposal;
-  } catch {
-    return null;
+  if (end < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  for (let i = end; i >= 0; i--) {
+    const ch = text[i];
+    if (inStr) {
+      if (ch === '"' && text[i - 1] !== "\\") inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "}") depth++;
+    else if (ch === "{") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(i, end + 1)) as ZoningProposal;
+        } catch {
+          return null;
+        }
+      }
+    }
   }
+  return null;
 }
 
 /**
@@ -146,17 +168,20 @@ export async function proposeFromWebSearch(
   const c = client();
   if (!c) return { ok: false, error: "ANTHROPIC_API_KEY is not set for Feasible — add it, then retry." };
   try {
+    // Basic web_search variant on purpose: the _20260209 dynamic-filtering
+    // variant runs code execution under the hood and can loop for minutes; the
+    // basic one returns in ~20s, which is what a UI button needs.
     const res = await c.messages.create({
       model: MODEL,
-      max_tokens: 4096,
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }],
+      max_tokens: 3072,
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
       messages: [
         {
           role: "user",
           content:
             promptFor(town, address) +
             " Search the town's official zoning regulations online. Put the page you relied on in source_url." +
-            ' Respond with ONLY a JSON object of the form {"zoning_district","front_setback_ft","side_setback_ft","rear_setback_ft","max_coverage_pct","min_lot_sf","citation","confidence","source_url","notes"} and no other text.',
+            ' You MUST end your reply with a single JSON object on its own line of the form {"zoning_district","front_setback_ft","side_setback_ft","rear_setback_ft","max_coverage_pct","min_lot_sf","citation","confidence","source_url","notes"} — use null for any value you could not confirm, and set confidence to "low" when the numbers were not clearly found.',
         },
       ],
     });
