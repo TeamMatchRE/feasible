@@ -27,9 +27,11 @@ import {
   proposeZoningFromPdf,
   proposeZoningFromSearch,
   checkFlood,
+  checkWetlands,
   type ZoningInput,
 } from "./actions";
 import type { FloodReport } from "@/lib/flood";
+import type { WetlandsReport } from "@/lib/wetlands";
 
 // Default frame: north-central CT, until a project has a center or a parcel.
 const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
@@ -715,6 +717,7 @@ export default function Studio({
         ) : null}
 
         <FloodCard projectId={projectId} />
+        <WetlandsCard projectId={projectId} />
 
         <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Setback checks</h3>
@@ -1048,6 +1051,71 @@ function FloodCard({ projectId }: { projectId: string }) {
         </div>
       ) : !err ? (
         <p className="mt-2 text-xs text-muted">Check the FEMA flood zone for this site.</p>
+      ) : null}
+    </section>
+  );
+}
+
+function WetlandsCard({ projectId }: { projectId: string }) {
+  const [report, setReport] = useState<WetlandsReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setErr(null);
+    const res = await checkWetlands(projectId);
+    setBusy(false);
+    if (!res.ok || !res.report) {
+      setErr(res.error ?? "Wetlands lookup failed.");
+      return;
+    }
+    setReport(res.report);
+  }
+
+  return (
+    <section className="rounded-lg border border-line bg-white p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-display text-lg text-ink">Wetlands</h3>
+        <button
+          onClick={() => void run()}
+          disabled={busy}
+          className="rounded-md border border-line px-2.5 py-1 text-xs text-ink transition hover:border-gold disabled:opacity-50"
+        >
+          {busy ? "Checking…" : report ? "Re-check" : "Check wetlands"}
+        </button>
+      </div>
+      {err ? <p className="mt-2 text-xs text-fail">{err}</p> : null}
+      {report ? (
+        report.present ? (
+          <div className="mt-3 space-y-1.5 text-sm">
+            <span className="inline-block rounded bg-warn/10 px-2 py-0.5 text-xs font-medium text-warn">
+              {report.count} mapped on/overlapping the parcel
+            </span>
+            <ul className="mt-1 space-y-1">
+              {report.groups.map((g) => (
+                <li key={g.type} className="text-xs text-muted">
+                  <span className="text-ink">{g.type}</span> — {g.acres} ac{" "}
+                  <span className="opacity-70">({g.codes.join(", ")})</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-xs italic text-muted/80">
+              USFWS NWI — advisory first-pass; a wetland delineation / town IWWC soils govern.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-3 text-sm">
+            <span className="inline-block rounded bg-pass/10 px-2 py-0.5 text-xs font-medium text-pass">
+              None mapped on the parcel
+            </span>
+            <p className="mt-1 text-xs italic text-muted/80">
+              USFWS NWI — no mapped wetlands overlap the lot; not a substitute for a delineation.
+            </p>
+          </div>
+        )
+      ) : !err ? (
+        <p className="mt-2 text-xs text-muted">Screen the lot against USFWS mapped wetlands.</p>
       ) : null}
     </section>
   );

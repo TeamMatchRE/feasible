@@ -6,6 +6,7 @@ import { sql } from "@/db";
 import { fetchParcelAt } from "@/lib/parcels";
 import { proposeFromPdf, proposeFromWebSearch, type ProposeResult } from "@/lib/zoning";
 import { fetchFloodAt, type FloodReport } from "@/lib/flood";
+import { fetchWetlandsForParcel, type WetlandsReport } from "@/lib/wetlands";
 import {
   RULES,
   HOUSE_IN_ENVELOPE,
@@ -263,6 +264,34 @@ export async function checkFlood(projectId: string): Promise<FloodResult> {
     return { ok: true, report };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Flood lookup failed." };
+  }
+}
+
+export interface WetlandsResult {
+  ok: boolean;
+  report?: WetlandsReport;
+  error?: string;
+}
+
+/**
+ * NWI wetlands intersecting the parcel. Needs a parcel (sends its ring to FEMA's
+ * USFWS service). Advisory / ephemeral.
+ */
+export async function checkWetlands(projectId: string): Promise<WetlandsResult> {
+  try {
+    await assertOwner(projectId);
+    const [row] = await sql<{ gj: string }[]>`
+      select ${sql.unsafe("ST_AsGeoJSON(ST_Transform(geom, 4326))")} as gj
+      from feasible.parcels where project_id = ${projectId} limit 1`;
+    if (!row) return { ok: false, error: "Pull the parcel first — wetlands are screened against the lot boundary." };
+    const gj = JSON.parse(row.gj) as { type: string; coordinates: number[][][] };
+    const ring = (gj.coordinates?.[0] ?? []) as [number, number][];
+    if (ring.length < 3) return { ok: false, error: "Parcel geometry unavailable." };
+    const report = await fetchWetlandsForParcel(ring);
+    if (!report) return { ok: false, error: "Wetlands service unavailable — try again." };
+    return { ok: true, report };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Wetlands lookup failed." };
   }
 }
 
