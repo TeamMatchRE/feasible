@@ -9,12 +9,23 @@ import {
   verdictOf,
   fmtFt,
   fmtSf,
+  ringEdgesFt,
   type FeatureKind,
   type PlacedFeature,
   type GeoJSONGeometry,
   type ValidationRow,
 } from "@/lib/geo";
-import { saveFeature, deleteFeature, runFeasibility } from "./actions";
+import type { ParcelInfo } from "@/lib/queries";
+import {
+  saveFeature,
+  deleteFeature,
+  runFeasibility,
+  importParcel,
+  setFrontageEdge,
+  computeEnvelope,
+  saveZoning,
+  type ZoningInput,
+} from "./actions";
 
 // Default frame: north-central CT, until a project has a center or a parcel.
 const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
@@ -81,20 +92,29 @@ interface Draft {
 
 export default function Studio({
   projectId,
+  address,
   center,
   initialFeatures,
   initialValidations,
+  initialParcel,
+  initialHasEnvelope,
 }: {
   projectId: string;
+  address: string | null;
   center: { lat: number; lng: number } | null;
   initialFeatures: PlacedFeature[];
   initialValidations: ValidationRow[];
+  initialParcel: ParcelInfo | null;
+  initialHasEnvelope: boolean;
 }) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const gRef = useRef<typeof google | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<Map<string, google.maps.MVCObject>>(new Map());
   const draftRef = useRef<Draft>({ points: [], line: null, poly: null, markers: [] });
+  // Edge dimension labels + frontage-tag markers, kept apart from feature overlays.
+  const dimLabelsRef = useRef<google.maps.Marker[]>([]);
+  const edgeMarkersRef = useRef<google.maps.Marker[]>([]);
 
   const [ready, setReady] = useState(false);
   const [features, setFeatures] = useState<PlacedFeature[]>(initialFeatures);
@@ -105,13 +125,18 @@ export default function Studio({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [skipped, setSkipped] = useState<string[]>([]);
+  const [parcel, setParcel] = useState<ParcelInfo | null>(initialParcel);
+  const [hasEnvelope, setHasEnvelope] = useState(initialHasEnvelope);
+  const [frontageMode, setFrontageMode] = useState(false);
 
   const activeToolRef = useRef<FeatureKind | null>(null);
   const bedroomsRef = useRef(3);
   const busyRef = useRef(false);
+  const featuresRef = useRef<PlacedFeature[]>(initialFeatures);
   activeToolRef.current = activeTool;
   bedroomsRef.current = bedrooms;
   busyRef.current = busy;
+  featuresRef.current = features;
 
   const removeOverlay = useCallback((id: string) => {
     const ov = overlaysRef.current.get(id);
@@ -203,6 +228,178 @@ export default function Studio({
     [projectId],
   );
 
+  // ---- Parcel dimension labels + frontage edge markers -------------------
+
+  const clearDimLabels = useCallback(() => {
+    dimLabelsRef.current.forEach((m) => m.setMap(null));
+    dimLabelsRef.current = [];
+  }, []);
+
+  const clearEdgeMarkers = useCallback(() => {
+    edgeMarkersRef.current.forEach((m) => m.setMap(null));
+    edgeMarkersRef.current = [];
+  }, []);
+
+  // Render "302 ft" labels at each parcel edge midpoint.
+  const drawDimLabels = useCallback(
+    (parcelGeojson: GeoJSONGeometry) => {
+      const g = gRef.current;
+      const map = mapRef.current;
+      if (!g || !map || parcelGeojson.type !== "Polygon") return;
+      clearDimLabels();
+      const ring = (parcelGeojson.coordinates as [number, number][][])[0];
+      for (const { mid, ft } of ringEdgesFt(ring)) {
+        dimLabelsRef.current.push(
+          new g.maps.Marker({
+            position: { lat: mid[1], lng: mid[0] },
+            map,
+            clickable: false,
+            // A zero-area transparent icon; the label carries the text.
+            icon: { path: "M 0,0 0,0", strokeOpacity: 0, scale: 0 },
+            label: {
+              text: `${Math.round(ft)} ft`,
+              color: "#1b2a44",
+              fontSize: "11px",
+              fontWeight: "600",
+              className: "dim-label",
+            },
+          }),
+        );
+      }
+    },
+    [clearDimLabels],
+  );
+
+  // Geocode the study address (Geocoder is in Maps core — no extra library).
+  const geocodeAddress = useCallback((): Promise<{ lat: number; lng: number } | null> => {
+    const g = gRef.current;
+    if (!g || !address) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      new g.maps.Geocoder().geocode({ address }, (results, status) => {
+        if (status === "OK" && results?.[0]) {
+          const loc = results[0].geometry.location;
+          resolve({ lat: loc.lat(), lng: loc.lng() });
+        } else {
+          resolve(null);
+        }
+      });
+    });
+  }, [address]);
+
+  // "Pull parcel from address": geocode -> CT parcel GIS -> replace overlay.
+  const pullParcel = useCallback(async () => {
+    const g = gRef.current;
+    const map = mapRef.current;
+    if (!g || !map) return;
+    setBusy(true);
+    setMsg(null);
+    // Prefer an explicit address; fall back to the current map centre.
+    const pt = (await geocodeAddress()) ?? { lat: map.getCenter()!.lat(), lng: map.getCenter()!.lng() };
+    const res = await importParcel(projectId, pt);
+    setBusy(false);
+    if (!res.ok || !res.feature) {
+      setMsg(res.error ?? "Could not pull the parcel.");
+      return;
+    }
+    // Remove any prior parcel/envelope overlays + labels; the import replaced them.
+    setFeatures((prev) => {
+      prev.filter((f) => f.kind === "parcel" || f.kind === "envelope").forEach((f) => removeOverlay(f.id));
+      return prev.filter((f) => f.kind !== "parcel" && f.kind !== "envelope");
+    });
+    clearEdgeMarkers();
+    setFrontageMode(false);
+    const f = res.feature;
+    setFeatures((prev) => [...prev, f]);
+    overlaysRef.current.set(f.id, drawFeature(g, map, f));
+    drawDimLabels(f.geojson);
+    setParcel({
+      id: f.id,
+      frontage_edge_idx: null,
+      zoning_district: null,
+      front_setback_ft: null,
+      side_setback_ft: null,
+      rear_setback_ft: null,
+      max_coverage_pct: null,
+      area_sf: f.area_sf ?? null,
+    });
+    setHasEnvelope(false);
+    // Frame to the new parcel.
+    const bounds = new g.maps.LatLngBounds();
+    for (const [lng, lat] of (f.geojson.coordinates as [number, number][][])[0]) bounds.extend({ lat, lng });
+    map.fitBounds(bounds);
+    setMsg(`Pulled ${res.meta?.town ?? "parcel"} lot — ${fmtSf(f.area_sf)}.${res.meta?.multipart ? " Multi-part lot — kept the largest piece." : ""}`);
+  }, [projectId, geocodeAddress, drawDimLabels, clearEdgeMarkers, removeOverlay]);
+
+  const applyEnvelope = useCallback(
+    (feature: PlacedFeature) => {
+      const g = gRef.current;
+      const map = mapRef.current;
+      if (!g || !map) return;
+      setFeatures((prev) => {
+        prev.filter((f) => f.kind === "envelope").forEach((f) => removeOverlay(f.id));
+        const next = prev.filter((f) => f.kind !== "envelope");
+        return [...next, feature];
+      });
+      overlaysRef.current.set(feature.id, drawFeature(g, map, feature));
+      setHasEnvelope(true);
+    },
+    [removeOverlay],
+  );
+
+  const onPickFrontage = useCallback(
+    async (idx: number) => {
+      setBusy(true);
+      setMsg(null);
+      const res = await setFrontageEdge(projectId, idx);
+      setBusy(false);
+      clearEdgeMarkers();
+      setFrontageMode(false);
+      setParcel((p) => (p ? { ...p, frontage_edge_idx: idx } : p));
+      if (!res.ok || !res.feature) {
+        setMsg(res.error ?? "Could not compute the envelope.");
+        return;
+      }
+      applyEnvelope(res.feature);
+      setMsg("Building envelope computed.");
+    },
+    [projectId, clearEdgeMarkers, applyEnvelope],
+  );
+
+  // Frontage tagging: numbered clickable markers at each edge midpoint.
+  const placeEdgeMarkers = useCallback(() => {
+    const g = gRef.current;
+    const map = mapRef.current;
+    const pf = featuresRef.current.find((f) => f.kind === "parcel");
+    if (!g || !map || !pf || pf.geojson.type !== "Polygon") return;
+    clearEdgeMarkers();
+    const ring = (pf.geojson.coordinates as [number, number][][])[0];
+    ringEdgesFt(ring).forEach(({ mid }, idx) => {
+      const marker = new g.maps.Marker({
+        position: { lat: mid[1], lng: mid[0] },
+        map,
+        clickable: true,
+        icon: { path: g.maps.SymbolPath.CIRCLE, scale: 9, fillColor: "#b08a46", fillOpacity: 1, strokeColor: "#ffffff", strokeWeight: 2 },
+        label: { text: `${idx + 1}`, color: "#ffffff", fontSize: "10px", fontWeight: "700" },
+        zIndex: 9999,
+      });
+      marker.addListener("click", () => void onPickFrontage(idx));
+      edgeMarkersRef.current.push(marker);
+    });
+  }, [clearEdgeMarkers, onPickFrontage]);
+
+  const recomputeEnvelope = useCallback(async () => {
+    setBusy(true);
+    setMsg(null);
+    const res = await computeEnvelope(projectId);
+    setBusy(false);
+    if (!res.ok || !res.feature) {
+      setMsg(res.error ?? "Could not compute the envelope.");
+      return;
+    }
+    applyEnvelope(res.feature);
+    setMsg("Building envelope updated.");
+  }, [projectId, applyEnvelope]);
+
   // A map click: place a point immediately, or add a polygon/line vertex.
   const onMapClick = useCallback(
     (latLng: google.maps.LatLng) => {
@@ -270,7 +467,8 @@ export default function Studio({
         let hasBounds = false;
         for (const f of initialFeatures) {
           overlaysRef.current.set(f.id, drawFeature(g, map, f));
-          if (f.geojson.type === "Polygon") {
+          if (f.kind === "parcel") drawDimLabels(f.geojson);
+          if (f.kind === "parcel" && f.geojson.type === "Polygon") {
             for (const [lng, lat] of (f.geojson.coordinates as [number, number][][])[0]) {
               bounds.extend({ lat, lng });
               hasBounds = true;
@@ -289,6 +487,12 @@ export default function Studio({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Show numbered edge markers while tagging the street-front edge.
+  useEffect(() => {
+    if (frontageMode) placeEdgeMarkers();
+    else clearEdgeMarkers();
+  }, [frontageMode, placeEdgeMarkers, clearEdgeMarkers]);
 
   function pickTool(kind: FeatureKind) {
     clearDraft();
@@ -331,6 +535,15 @@ export default function Studio({
       {/* Map + toolbar */}
       <div className="overflow-hidden rounded-lg border border-line bg-white">
         <div className="flex flex-wrap items-center gap-2 border-b border-line bg-parchment/60 px-3 py-2">
+          <button
+            onClick={() => void pullParcel()}
+            disabled={!ready || busy}
+            title={address ? `Pull the real lot for ${address}` : "Pull the real lot at the map centre"}
+            className="rounded-md border border-ink bg-ink px-3 py-1.5 text-sm font-medium text-parchment transition hover:bg-ink-soft disabled:opacity-50"
+          >
+            {parcel ? "Re-pull parcel" : "Pull parcel from address"}
+          </button>
+          <span className="mx-1 h-5 w-px bg-line" aria-hidden />
           {TOOL_ORDER.map((kind) => (
             <button
               key={kind}
@@ -409,6 +622,95 @@ export default function Studio({
         <VerdictCard verdict={verdict} onRun={onRun} busy={busy} ready={ready} />
 
         <section className="rounded-lg border border-line bg-white p-4">
+          <h3 className="font-display text-lg text-ink">Site setup</h3>
+
+          {/* 1 — Parcel */}
+          <div className="mt-3 flex items-start justify-between gap-2">
+            <div>
+              <p className="text-sm text-ink">Parcel</p>
+              <p className="text-xs text-muted">
+                {parcel ? fmtSf(parcel.area_sf) : "Not pulled — use “Pull parcel from address”."}
+              </p>
+            </div>
+            {parcel ? <span className="shrink-0 rounded bg-pass/10 px-2 py-0.5 text-xs font-medium text-pass">Set</span> : null}
+          </div>
+
+          {/* 2 — Setbacks (populated by the zoning step; editable there) */}
+          <div className="mt-3 border-t border-line/60 pt-3">
+            <p className="text-sm text-ink">Setbacks</p>
+            {parcel && (parcel.front_setback_ft != null || parcel.side_setback_ft != null || parcel.rear_setback_ft != null) ? (
+              <p className="text-xs text-muted">
+                Front {fmtFt(parcel.front_setback_ft)} · Side {fmtFt(parcel.side_setback_ft)} · Rear {fmtFt(parcel.rear_setback_ft)}
+                {parcel.zoning_district ? ` · ${parcel.zoning_district}` : ""}
+              </p>
+            ) : (
+              <p className="text-xs text-muted">Not set — add zoning in the “Zoning &amp; setbacks” card.</p>
+            )}
+          </div>
+
+          {/* 3 — Building envelope */}
+          <div className="mt-3 border-t border-line/60 pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm text-ink">Building envelope</p>
+              {hasEnvelope ? <span className="shrink-0 rounded bg-pass/10 px-2 py-0.5 text-xs font-medium text-pass">Drawn</span> : null}
+            </div>
+            {!parcel ? (
+              <p className="mt-1 text-xs text-muted">Pull the parcel first.</p>
+            ) : parcel.front_setback_ft == null && parcel.side_setback_ft == null && parcel.rear_setback_ft == null ? (
+              <p className="mt-1 text-xs text-muted">Set the zoning setbacks first — the envelope is built from them.</p>
+            ) : frontageMode ? (
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-xs text-gold-deep">Click the numbered edge on the map that fronts the street.</span>
+                <button onClick={() => setFrontageMode(false)} className="text-xs text-muted hover:text-ink">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setFrontageMode(true)}
+                  disabled={busy}
+                  className="rounded-md border border-gold bg-gold/10 px-2.5 py-1 text-xs font-medium text-gold-deep transition hover:bg-gold/20 disabled:opacity-50"
+                >
+                  {parcel.frontage_edge_idx != null ? "Re-tag street edge" : "Tag street edge"}
+                </button>
+                <button
+                  onClick={() => void recomputeEnvelope()}
+                  disabled={busy}
+                  className="rounded-md border border-line px-2.5 py-1 text-xs text-ink transition hover:border-gold disabled:opacity-50"
+                  title="Recompute from the current setbacks (uniform inset if no street edge is tagged)"
+                >
+                  {hasEnvelope ? "Recompute" : "Compute (uniform)"}
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {parcel ? (
+          <ZoningCard
+            projectId={projectId}
+            parcel={parcel}
+            busy={busy}
+            onSaved={(z) => {
+              setParcel((p) =>
+                p
+                  ? {
+                      ...p,
+                      zoning_district: z.zoning_district ?? null,
+                      front_setback_ft: z.front_setback_ft ?? null,
+                      side_setback_ft: z.side_setback_ft ?? null,
+                      rear_setback_ft: z.rear_setback_ft ?? null,
+                      max_coverage_pct: z.max_coverage_pct ?? null,
+                    }
+                  : p,
+              );
+              setMsg("Zoning setbacks saved. Tag the street edge to draw the envelope.");
+            }}
+          />
+        ) : null}
+
+        <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Setback checks</h3>
           {validations.length === 0 ? (
             <p className="mt-2 text-sm text-muted">
@@ -459,13 +761,17 @@ export default function Studio({
                     <span className="text-ink">{KIND_META[f.kind].label}</span>
                     <span className="num text-xs text-muted">{metric(f)}</span>
                   </span>
-                  <button
-                    onClick={() => onDelete(f)}
-                    disabled={busy}
-                    className="text-xs text-muted transition hover:text-fail disabled:opacity-50"
-                  >
-                    Remove
-                  </button>
+                  {f.kind === "envelope" ? (
+                    <span className="text-xs italic text-muted/70">computed</span>
+                  ) : (
+                    <button
+                      onClick={() => onDelete(f)}
+                      disabled={busy}
+                      className="text-xs text-muted transition hover:text-fail disabled:opacity-50"
+                    >
+                      Remove
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -479,9 +785,106 @@ export default function Studio({
 function metric(f: PlacedFeature): string {
   if (f.kind === "parcel") return fmtSf(f.area_sf);
   if (f.kind === "leachfield") return fmtSf(f.area_sf);
+  if (f.kind === "envelope") return fmtSf(f.area_sf);
   if (f.kind === "road") return fmtFt(f.length_ft);
   if (f.kind === "septic" && f.num_bedrooms) return `${f.num_bedrooms} br`;
   return "";
+}
+
+function numOrNull(s: string): number | null {
+  const n = parseFloat(s);
+  return s.trim() === "" || Number.isNaN(n) ? null : n;
+}
+
+function ZoningCard({
+  projectId,
+  parcel,
+  busy,
+  onSaved,
+}: {
+  projectId: string;
+  parcel: ParcelInfo;
+  busy: boolean;
+  onSaved: (z: ZoningInput) => void;
+}) {
+  const [district, setDistrict] = useState(parcel.zoning_district ?? "");
+  const [front, setFront] = useState(parcel.front_setback_ft?.toString() ?? "");
+  const [side, setSide] = useState(parcel.side_setback_ft?.toString() ?? "");
+  const [rear, setRear] = useState(parcel.rear_setback_ft?.toString() ?? "");
+  const [coverage, setCoverage] = useState(parcel.max_coverage_pct?.toString() ?? "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function confirm() {
+    setSaving(true);
+    setErr(null);
+    const z: ZoningInput = {
+      zoning_district: district.trim() || null,
+      front_setback_ft: numOrNull(front),
+      side_setback_ft: numOrNull(side),
+      rear_setback_ft: numOrNull(rear),
+      max_coverage_pct: numOrNull(coverage),
+    };
+    const res = await saveZoning(projectId, z);
+    setSaving(false);
+    if (!res.ok) {
+      setErr(res.error ?? "Could not save.");
+      return;
+    }
+    onSaved(z);
+  }
+
+  const field = (label: string, val: string, set: (v: string) => void, unit: string) => (
+    <label className="flex flex-col gap-1 text-xs text-muted">
+      {label}
+      <span className="flex items-center gap-1">
+        <input
+          type="number"
+          value={val}
+          onChange={(e) => set(e.target.value)}
+          className="w-20 rounded border border-line px-1.5 py-1 text-sm text-ink"
+        />
+        <span>{unit}</span>
+      </span>
+    </label>
+  );
+
+  return (
+    <section className="rounded-lg border border-line bg-white p-4">
+      <h3 className="font-display text-lg text-ink">Zoning &amp; setbacks</h3>
+      <p className="mt-1 text-xs text-muted">
+        Enter the governing district&rsquo;s setbacks (or upload the town regs / search — coming next), then confirm. These drive the building envelope.
+      </p>
+
+      <label className="mt-3 flex flex-col gap-1 text-xs text-muted">
+        Zoning district
+        <input
+          type="text"
+          value={district}
+          onChange={(e) => setDistrict(e.target.value)}
+          placeholder="e.g. R-2"
+          className="rounded border border-line px-2 py-1 text-sm text-ink"
+        />
+      </label>
+
+      <div className="mt-3 flex flex-wrap gap-3">
+        {field("Front", front, setFront, "ft")}
+        {field("Side", side, setSide, "ft")}
+        {field("Rear", rear, setRear, "ft")}
+        {field("Max coverage", coverage, setCoverage, "%")}
+      </div>
+
+      {err ? <p className="mt-2 text-xs text-fail">{err}</p> : null}
+
+      <button
+        onClick={() => void confirm()}
+        disabled={saving || busy}
+        className="mt-3 w-full rounded-md bg-ink px-4 py-2 text-sm font-medium text-parchment transition hover:bg-ink-soft disabled:opacity-50"
+      >
+        {saving ? "Saving…" : "Confirm setbacks"}
+      </button>
+    </section>
+  );
 }
 
 function StatusPill({ status }: { status: ValidationRow["status"] }) {

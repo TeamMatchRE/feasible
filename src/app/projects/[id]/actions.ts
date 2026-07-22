@@ -3,8 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/session";
 import { sql } from "@/db";
+import { fetchParcelAt } from "@/lib/parcels";
 import {
   RULES,
+  HOUSE_IN_ENVELOPE,
   verdictOf,
   type FeatureKind,
   type GeoJSONGeometry,
@@ -126,7 +128,67 @@ const KIND_TABLE: Record<FeatureKind, string> = {
   septic: "feasible.septic_systems",
   leachfield: "feasible.leach_fields",
   road: "feasible.road_segments",
+  // Not user-drawn/deletable through the generic path; managed by computeEnvelope.
+  envelope: "feasible.building_envelopes",
 };
+
+export interface ImportParcelResult {
+  ok: boolean;
+  feature?: PlacedFeature;
+  meta?: { town: string | null; owner: string | null; acres: number | null; multipart: boolean };
+  error?: string;
+}
+
+/**
+ * Pull the real parcel that contains (lat,lng) from the CT assessor GIS and
+ * store it as this project's parcel — replacing any existing one (and clearing
+ * the now-stale envelope/validations). Geometry rides the same toGeom() path as
+ * a hand-drawn parcel, so everything downstream is unchanged.
+ */
+export async function importParcel(
+  projectId: string,
+  point: { lat: number; lng: number },
+): Promise<ImportParcelResult> {
+  try {
+    await assertOwner(projectId);
+    const hit = await fetchParcelAt(point.lat, point.lng);
+    if (!hit) {
+      return { ok: false, error: "No CT parcel found at that location. Draw the lot manually, or check the address." };
+    }
+    const geojson: GeoJSONGeometry = { type: "Polygon", coordinates: [hit.ring] };
+
+    // Replace: a project has one parcel. Dropping it clears the envelope (FK
+    // cascade is on project, not parcel, so clear envelope explicitly) and any
+    // validations that referenced the old boundary.
+    await sql`delete from feasible.parcels where project_id = ${projectId}`;
+    await sql`delete from feasible.building_envelopes where project_id = ${projectId}`;
+    await sql`delete from feasible.design_validations where project_id = ${projectId}`;
+
+    const [r] = await sql<{ id: string; gj: string; area_sf: number; perimeter_ft: number }[]>`
+      insert into feasible.parcels (project_id, label, geom)
+      values (${projectId}, ${hit.address}, ${toGeom(geojson)})
+      returning id, ${sql.unsafe(AS_GJ_SQL)} as gj, area_sf, perimeter_ft`;
+
+    // The assessor parcel id lives on the project (parcels has no apn column);
+    // centre the project on the parcel if it wasn't already placed.
+    await sql`
+      update feasible.projects
+      set apn = coalesce(${hit.parcelId}, apn),
+          center_lat = coalesce(center_lat, ${point.lat}),
+          center_lng = coalesce(center_lng, ${point.lng}),
+          updated_at = now()
+      where id = ${projectId}`;
+
+    revalidatePath(`/projects/${projectId}`);
+    return {
+      ok: true,
+      feature: { kind: "parcel", id: r.id, label: hit.address, geojson: JSON.parse(r.gj), area_sf: r.area_sf, perimeter_ft: r.perimeter_ft },
+      meta: { town: hit.town, owner: hit.owner, acres: hit.acres, multipart: hit.multipart },
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Parcel import failed." };
+  }
+}
 
 /** Remove a placed feature (ownership already re-checked via the project). */
 export async function deleteFeature(
@@ -151,6 +213,170 @@ export async function deleteFeature(
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Delete failed." };
+  }
+}
+
+export interface ZoningInput {
+  zoning_district?: string | null;
+  front_setback_ft?: number | null;
+  side_setback_ft?: number | null;
+  rear_setback_ft?: number | null;
+  max_coverage_pct?: number | null;
+}
+
+/**
+ * Save the confirmed zoning district + dimensional setbacks onto the parcel.
+ * These are the values that drive the building envelope — distinct from the
+ * health-code well/septic distances in feasible.setback_rules. Whether they came
+ * from an uploaded PDF, a web lookup, or manual entry, they land here only after
+ * the user confirms them.
+ */
+export async function saveZoning(projectId: string, z: ZoningInput): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await assertOwner(projectId);
+    const [r] = await sql<{ id: string }[]>`
+      update feasible.parcels set
+        zoning_district  = ${z.zoning_district ?? null},
+        front_setback_ft = ${z.front_setback_ft ?? null},
+        side_setback_ft  = ${z.side_setback_ft ?? null},
+        rear_setback_ft  = ${z.rear_setback_ft ?? null},
+        max_coverage_pct = ${z.max_coverage_pct ?? null}
+      where project_id = ${projectId}
+      returning id`;
+    if (!r) return { ok: false, error: "Pull or draw the parcel first." };
+    revalidatePath(`/projects/${projectId}`);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not save zoning." };
+  }
+}
+
+export interface EnvelopeResult {
+  ok: boolean;
+  feature?: PlacedFeature;
+  error?: string;
+}
+
+/**
+ * Compute the buildable "building envelope" from the parcel + its setbacks and
+ * store it (one current row per project). Method: inset each boundary edge by
+ * its role's setback (front edge = front_setback, the edge farthest from it =
+ * rear, the rest = side), by subtracting a buffer of each edge from the parcel.
+ * When no frontage edge is tagged, fall back to a uniform inset = the largest
+ * setback (conservative). Returns the envelope as a 4326 GeoJSON polygon.
+ */
+export async function computeEnvelope(projectId: string): Promise<EnvelopeResult> {
+  try {
+    await assertOwner(projectId);
+
+    const [p] = await sql<
+      {
+        frontage_edge_idx: number | null;
+        fr: number | null;
+        sd: number | null;
+        re: number | null;
+        nverts: number;
+      }[]
+    >`
+      select frontage_edge_idx,
+             front_setback_ft as fr, side_setback_ft as sd, rear_setback_ft as re,
+             st_npoints(st_exteriorring(geom)) as nverts
+      from feasible.parcels where project_id = ${projectId}`;
+    if (!p) return { ok: false, error: "Import or draw the parcel first." };
+    if (p.fr == null && p.sd == null && p.re == null) {
+      return { ok: false, error: "Set the zoning setbacks first — the envelope is built from them." };
+    }
+
+    const fr = Number(p.fr ?? 0);
+    const sd = Number(p.sd ?? 0);
+    const re = Number(p.re ?? 0);
+
+    // Build the inset geometry. Two paths: per-edge (frontage tagged) or uniform.
+    const envSql =
+      p.frontage_edge_idx == null
+        ? sql`
+            with par as (select geom from feasible.parcels where project_id = ${projectId})
+            select st_buffer(geom, ${-Math.max(fr, sd, re)}) as g from par`
+        : sql`
+            with par as (
+              select geom, ${p.frontage_edge_idx}::int as fidx from feasible.parcels where project_id = ${projectId}
+            ),
+            pts as (
+              select (dp).path[1] as idx, (dp).geom as pt, par.geom as pgeom, par.fidx
+              from par, st_dumppoints(st_exteriorring(par.geom)) dp
+            ),
+            edges as (
+              select a.idx as eidx, st_makeline(a.pt, b.pt) as eline, a.pgeom, a.fidx
+              from pts a join pts b on b.idx = a.idx + 1
+            ),
+            front as (
+              select eline as fline, st_lineinterpolatepoint(eline, 0.5) as fmid
+              from edges where eidx = (select fidx from par) + 1
+            ),
+            rear as (
+              select eidx as ridx from edges
+              order by st_distance(st_lineinterpolatepoint(eline, 0.5), (select fmid from front)) desc
+              limit 1
+            ),
+            classified as (
+              select e.eline, e.pgeom,
+                case
+                  when e.eidx = (select fidx from par) + 1 then ${fr}::double precision
+                  when e.eidx = (select ridx from rear)     then ${re}::double precision
+                  else ${sd}::double precision
+                end as setback
+              from edges e
+            ),
+            buffers as (select st_buffer(eline, setback) as b from classified where setback > 0)
+            select st_difference((select geom from par), coalesce((select st_union(b) from buffers), st_geomfromtext('POLYGON EMPTY', 2234))) as g`;
+
+    // The difference can be a MultiPolygon (a pinched lot splitting the buildable
+    // area); keep the largest single polygon for the geometry(Polygon) column.
+    const [env] = await sql<{ gj: string; area_sf: number | null; empty: boolean }[]>`
+      with raw as (${envSql}),
+      largest as (
+        select gd.geom as geom
+        from raw, st_dump(st_collectionextract(raw.g, 3)) gd
+        order by st_area(gd.geom) desc
+        limit 1
+      )
+      select ${sql.unsafe("ST_AsGeoJSON(ST_Transform(geom, 4326))")} as gj,
+             st_area(geom) as area_sf,
+             (geom is null or st_isempty(geom)) as empty
+      from largest`;
+
+    if (!env || env.empty || !env.gj) {
+      // Nothing buildable — the setbacks consume the lot. Clear any old envelope.
+      await sql`delete from feasible.building_envelopes where project_id = ${projectId}`;
+      return { ok: false, error: "No buildable area remains — the setbacks consume the whole lot." };
+    }
+
+    const basis = JSON.stringify({ front_ft: fr, side_ft: sd, rear_ft: re, frontage_edge_idx: p.frontage_edge_idx });
+    await sql`delete from feasible.building_envelopes where project_id = ${projectId}`;
+    const [row] = await sql<{ id: string; gj: string; area_sf: number }[]>`
+      insert into feasible.building_envelopes (project_id, geom, basis)
+      values (${projectId},
+              ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(${env.gj}), 4326), 2234),
+              ${basis}::jsonb)
+      returning id, ${sql.unsafe(AS_GJ_SQL)} as gj, area_sf`;
+
+    revalidatePath(`/projects/${projectId}`);
+    return { ok: true, feature: { kind: "envelope", id: row.id, label: "Building envelope", geojson: JSON.parse(row.gj), area_sf: row.area_sf } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Envelope computation failed." };
+  }
+}
+
+/** Tag which boundary edge fronts the street, then recompute the envelope. */
+export async function setFrontageEdge(projectId: string, edgeIdx: number): Promise<EnvelopeResult> {
+  try {
+    await assertOwner(projectId);
+    await sql`
+      update feasible.parcels set frontage_edge_idx = ${edgeIdx}
+      where project_id = ${projectId}`;
+    return await computeEnvelope(projectId);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not set frontage edge." };
   }
 }
 
@@ -243,6 +469,36 @@ export async function runFeasibility(projectId: string): Promise<FeasibilityResu
       subject_b: String(rule.b),
       message,
     });
+  }
+
+  // Building-envelope containment: every placed house must sit inside the
+  // computed envelope. Only evaluated when both an envelope and a house exist.
+  const [envHouse] = await sql<{ nhouses: number; nenv: number; noutside: number; maxout: number | null }[]>`
+    with env as (select geom as g from feasible.building_envelopes where project_id = ${projectId}),
+         h as (select geom as g from feasible.template_placements where project_id = ${projectId})
+    select (select count(*) from h) as nhouses,
+           (select count(*) from env) as nenv,
+           (select count(*) from h, env where not st_within(h.g, env.g)) as noutside,
+           (select max(st_distance(h.g, env.g)) from h, env where not st_within(h.g, env.g)) as maxout`;
+  if (envHouse && envHouse.nenv > 0 && envHouse.nhouses > 0) {
+    const outside = Number(envHouse.noutside);
+    const status: ValidationStatus = outside > 0 ? "fail" : "pass";
+    const message =
+      outside > 0
+        ? `${outside} of ${envHouse.nhouses} house${envHouse.nhouses === 1 ? "" : "s"} cross the setback line` +
+          (envHouse.maxout ? ` (up to ${Math.round(Number(envHouse.maxout))} ft outside).` : ".")
+        : `All ${envHouse.nhouses} house${envHouse.nhouses === 1 ? "" : "s"} sit within the buildable area.`;
+    rows.push({
+      rule_key: HOUSE_IN_ENVELOPE,
+      measured_ft: envHouse.maxout != null ? Math.round(Number(envHouse.maxout) * 10) / 10 : 0,
+      required_ft: 0,
+      status,
+      subject_a: "house",
+      subject_b: "envelope",
+      message,
+    });
+  } else if (envHouse && envHouse.nenv > 0) {
+    skipped.push(HOUSE_IN_ENVELOPE);
   }
 
   // Persist: replace this project's validation set, then set the verdict.

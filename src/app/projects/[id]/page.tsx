@@ -34,9 +34,12 @@ export default async function ProjectPage({
 
       <Studio
         projectId={project.id}
+        address={project.address}
         center={center}
         initialFeatures={project.features}
         initialValidations={project.validations}
+        initialParcel={project.parcel}
+        initialHasEnvelope={project.hasEnvelope}
       />
     </Shell>
   );

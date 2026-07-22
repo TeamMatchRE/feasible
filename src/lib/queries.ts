@@ -26,6 +26,17 @@ export async function listProjects(ownerId: string): Promise<ProjectSummary[]> {
   return rows;
 }
 
+export interface ParcelInfo {
+  id: string;
+  frontage_edge_idx: number | null;
+  zoning_district: string | null;
+  front_setback_ft: number | null;
+  side_setback_ft: number | null;
+  rear_setback_ft: number | null;
+  max_coverage_pct: number | null;
+  area_sf: number | null;
+}
+
 export interface ProjectDetail {
   id: string;
   name: string;
@@ -35,6 +46,10 @@ export interface ProjectDetail {
   center_lng: number | null;
   features: PlacedFeature[];
   validations: ValidationRow[];
+  /** The parcel's non-geometry state (setbacks, frontage tag) — null until one exists. */
+  parcel: ParcelInfo | null;
+  /** True when a building envelope has been computed and is current. */
+  hasEnvelope: boolean;
 }
 
 function parseGj(s: string): GeoJSONGeometry {
@@ -68,11 +83,46 @@ export async function loadProject(
   const g = "ST_AsGeoJSON(ST_Transform(geom, 4326))";
   const features: PlacedFeature[] = [];
 
-  const parcels = await sql<{ id: string; label: string | null; gj: string; area_sf: number | null; perimeter_ft: number | null }[]>`
-    select id, label, ${sql.unsafe(g)} as gj, area_sf, perimeter_ft
+  const parcels = await sql<
+    {
+      id: string;
+      label: string | null;
+      gj: string;
+      area_sf: number | null;
+      perimeter_ft: number | null;
+      frontage_edge_idx: number | null;
+      zoning_district: string | null;
+      front_setback_ft: number | null;
+      side_setback_ft: number | null;
+      rear_setback_ft: number | null;
+      max_coverage_pct: number | null;
+    }[]
+  >`
+    select id, label, ${sql.unsafe(g)} as gj, area_sf, perimeter_ft,
+           frontage_edge_idx, zoning_district,
+           front_setback_ft, side_setback_ft, rear_setback_ft, max_coverage_pct
     from feasible.parcels where project_id = ${projectId}`;
-  for (const r of parcels)
+  let parcel: ParcelInfo | null = null;
+  for (const r of parcels) {
     features.push({ kind: "parcel", id: r.id, label: r.label, geojson: parseGj(r.gj), area_sf: r.area_sf, perimeter_ft: r.perimeter_ft });
+    parcel = {
+      id: r.id,
+      frontage_edge_idx: r.frontage_edge_idx,
+      zoning_district: r.zoning_district,
+      front_setback_ft: r.front_setback_ft,
+      side_setback_ft: r.side_setback_ft,
+      rear_setback_ft: r.rear_setback_ft,
+      max_coverage_pct: r.max_coverage_pct,
+      area_sf: r.area_sf,
+    };
+  }
+
+  // The computed building envelope, if any, rides along as a (non-deletable) overlay.
+  const envelopes = await sql<{ id: string; gj: string; area_sf: number | null }[]>`
+    select id, ${sql.unsafe(g)} as gj, area_sf
+    from feasible.building_envelopes where project_id = ${projectId}`;
+  for (const r of envelopes)
+    features.push({ kind: "envelope", id: r.id, label: "Building envelope", geojson: parseGj(r.gj), area_sf: r.area_sf });
 
   const houses = await sql<{ id: string; label: string | null; gj: string }[]>`
     select id, label, ${sql.unsafe(g)} as gj
@@ -122,5 +172,7 @@ export async function loadProject(
     center_lng: proj.center_lng,
     features,
     validations,
+    parcel,
+    hasEnvelope: envelopes.length > 0,
   };
 }

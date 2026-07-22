@@ -12,7 +12,8 @@ export type FeatureKind =
   | "well"
   | "septic"
   | "leachfield"
-  | "road";
+  | "road"
+  | "envelope";
 
 export type GeomType = "Polygon" | "Point" | "LineString";
 
@@ -48,6 +49,8 @@ export const KIND_META: Record<
   well: { label: "Well", geom: "Point", stroke: "#2b6ca3", fill: "#2b6ca3" },
   septic: { label: "Septic tank", geom: "Point", stroke: "#7a4bbf", fill: "#7a4bbf" },
   road: { label: "Road / drive", geom: "LineString", stroke: "#5a5346", fill: "#5a534600" },
+  // The computed buildable area. Not user-drawn — rendered from the setbacks.
+  envelope: { label: "Building envelope", geom: "Polygon", stroke: "#2f6b4f", fill: "#2f6b4f22" },
 };
 
 export type ValidationStatus = "pass" | "warn" | "fail";
@@ -83,9 +86,47 @@ export const RULES: RuleDef[] = [
   { rule_key: "leachfield_to_property_line", label: "Leach field → Property line", a: "leachfield", b: "property_line" },
 ];
 
+/**
+ * The building-envelope containment check. Structurally different from the
+ * distance RULES above (it's ST_Within, not ST_Distance), so the engine
+ * produces it separately — but it shares the ValidationRow shape and shows up
+ * in the same Setback-checks list.
+ */
+export const HOUSE_IN_ENVELOPE = "house_in_envelope";
+
+const EXTRA_LABELS: Record<string, string> = {
+  [HOUSE_IN_ENVELOPE]: "House within building envelope",
+};
+
 /** Human label for a rule_key, falling back to the raw key. */
 export function ruleLabel(key: string): string {
-  return RULES.find((r) => r.rule_key === key)?.label ?? key;
+  return RULES.find((r) => r.rule_key === key)?.label ?? EXTRA_LABELS[key] ?? key;
+}
+
+/**
+ * Per-edge lengths of a closed 4326 ring, in feet, with each segment's midpoint
+ * (for on-map dimension labels like the MLS "302 ft / 434 ft" annotations).
+ * Uses the haversine great-circle distance — plenty accurate at parcel scale
+ * and avoids pulling in Google's geometry library (the loader ships with none).
+ */
+export function ringEdgesFt(
+  ring: [number, number][],
+): { mid: [number, number]; ft: number }[] {
+  const R_FT = 20925721.784; // mean Earth radius in feet
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const out: { mid: [number, number]; ft: number }[] = [];
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [lng1, lat1] = ring[i];
+    const [lng2, lat2] = ring[i + 1];
+    const dLat = rad(lat2 - lat1);
+    const dLng = rad(lng2 - lng1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2;
+    const ft = 2 * R_FT * Math.asin(Math.min(1, Math.sqrt(a)));
+    out.push({ mid: [(lng1 + lng2) / 2, (lat1 + lat2) / 2], ft });
+  }
+  return out;
 }
 
 /** Overall verdict from a set of validation rows. */
