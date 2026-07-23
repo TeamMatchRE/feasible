@@ -2,6 +2,97 @@ import "server-only";
 import { sql } from "@/db";
 import type { PlacedFeature, ValidationRow, GeoJSONGeometry } from "@/lib/geo";
 
+// ---- Design library ------------------------------------------------------
+
+export interface DesignSummary {
+  id: string;
+  name: string;
+  model_type: string | null;
+  living_area_sf: number | null;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  updated_at: string;
+}
+
+/** A user's saved house designs (building_templates), newest first. */
+export async function listDesigns(ownerId: string): Promise<DesignSummary[]> {
+  return sql<DesignSummary[]>`
+    select id, name, model_type, living_area_sf, bedrooms, bathrooms, updated_at
+    from feasible.building_templates
+    where owner_id = ${ownerId}
+    order by updated_at desc`;
+}
+
+export interface DesignTakeoffRow {
+  category: string;
+  description: string | null;
+  quantity: number;
+  unit: string;
+}
+export interface DesignDetail {
+  id: string;
+  name: string;
+  model_type: string | null;
+  living_area_sf: number | null;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  footprint_width_ft: number | null;
+  footprint_depth_ft: number | null;
+  attributes: Record<string, unknown>;
+  storage_path: string | null;
+  file_kind: string | null;
+  takeoff: DesignTakeoffRow[];
+}
+
+/** One design with its takeoff + plan-file pointer, scoped to the owner. */
+export async function loadDesign(id: string, ownerId: string): Promise<DesignDetail | null> {
+  const [d] = await sql<
+    {
+      id: string;
+      name: string;
+      model_type: string | null;
+      living_area_sf: number | null;
+      bedrooms: number | null;
+      bathrooms: number | null;
+      footprint_width_ft: number | null;
+      footprint_depth_ft: number | null;
+      attributes: Record<string, unknown> | null;
+    }[]
+  >`
+    select id, name, model_type, living_area_sf, bedrooms, bathrooms,
+           footprint_width_ft, footprint_depth_ft, attributes
+    from feasible.building_templates
+    where id = ${id} and owner_id = ${ownerId}`;
+  if (!d) return null;
+
+  const [file] = await sql<{ storage_path: string; kind: string }[]>`
+    select storage_path, kind from feasible.project_files
+    where template_id = ${id} and owner_id = ${ownerId}
+    order by created_at desc limit 1`;
+
+  const takeoff = await sql<DesignTakeoffRow[]>`
+    select ti.category, ti.description, ti.quantity, ti.unit::text as unit
+    from feasible.takeoff_items ti
+    join feasible.takeoffs t on t.id = ti.takeoff_id
+    where t.template_id = ${id} and t.owner_id = ${ownerId}
+    order by ti.created_at`;
+
+  return {
+    id: d.id,
+    name: d.name,
+    model_type: d.model_type,
+    living_area_sf: d.living_area_sf,
+    bedrooms: d.bedrooms,
+    bathrooms: d.bathrooms,
+    footprint_width_ft: d.footprint_width_ft,
+    footprint_depth_ft: d.footprint_depth_ft,
+    attributes: d.attributes ?? {},
+    storage_path: file?.storage_path ?? null,
+    file_kind: file?.kind ?? null,
+    takeoff,
+  };
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

@@ -21,6 +21,14 @@ export default function Shell({
           <Link href="/" className="font-display text-2xl tracking-tight text-ink">
             Feasible
           </Link>
+          <nav className="flex items-center gap-3 text-sm">
+            <Link href="/" className="text-muted transition hover:text-ink">
+              Studies
+            </Link>
+            <Link href="/designs" className="text-muted transition hover:text-ink">
+              Designs
+            </Link>
+          </nav>
           {crumb ? (
             <span className="truncate text-sm text-muted">{crumb}</span>
           ) : null}
