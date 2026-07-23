@@ -19,6 +19,7 @@ import {
   type LngLat,
 } from "@/lib/geo";
 import type { ParcelInfo } from "@/lib/queries";
+import { OVERLAYS, type OverlayId } from "@/lib/overlays";
 import {
   saveFeature,
   deleteFeature,
@@ -142,6 +143,8 @@ export default function Studio({
   // Live distance "rubber-band" shown while placing a well/septic.
   const measureLineRef = useRef<google.maps.Polyline | null>(null);
   const measureLabelRef = useRef<google.maps.Marker | null>(null);
+  // Toggleable ArcGIS raster overlays (flood / wetlands / hillshade).
+  const overlayRefs = useRef<Partial<Record<OverlayId, google.maps.ImageMapType>>>({});
 
   const [ready, setReady] = useState(false);
   const [features, setFeatures] = useState<PlacedFeature[]>(initialFeatures);
@@ -157,6 +160,7 @@ export default function Studio({
   const [frontageMode, setFrontageMode] = useState(false);
   // Live distances (to the pair feature / property line / house) while placing.
   const [liveMeasure, setLiveMeasure] = useState<{ label: string; ft: number; min?: number }[]>([]);
+  const [overlays, setOverlays] = useState<Set<OverlayId>>(new Set());
 
   const activeToolRef = useRef<FeatureKind | null>(null);
   const bedroomsRef = useRef(3);
@@ -633,6 +637,36 @@ export default function Studio({
     setActiveTool((cur) => (cur === kind ? null : kind));
   }
 
+  function toggleOverlay(id: OverlayId) {
+    const g = gRef.current;
+    const map = mapRef.current;
+    if (!g || !map) return;
+    setOverlays((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        const imt = overlayRefs.current[id];
+        if (imt) {
+          const i = map.overlayMapTypes.getArray().indexOf(imt);
+          if (i >= 0) map.overlayMapTypes.removeAt(i);
+          delete overlayRefs.current[id];
+        }
+      } else {
+        next.add(id);
+        const def = OVERLAYS.find((o) => o.id === id)!;
+        const imt = new g.maps.ImageMapType({
+          name: def.label,
+          tileSize: new g.maps.Size(256, 256),
+          opacity: 0.55,
+          getTileUrl: (c, z) => def.getTileUrl(c.x, c.y, z),
+        });
+        overlayRefs.current[id] = imt;
+        map.overlayMapTypes.push(imt);
+      }
+      return next;
+    });
+  }
+
   async function onDelete(f: PlacedFeature) {
     setBusy(true);
     const res = await deleteFeature(projectId, f.kind, f.id);
@@ -743,6 +777,31 @@ export default function Studio({
             {draftCount ? ` (${draftCount} point${draftCount === 1 ? "" : "s"})` : ""}
           </div>
         ) : null}
+
+        <div className="flex flex-wrap items-center gap-2 border-b border-line bg-white px-3 py-1.5 text-xs">
+          <span className="text-muted">Overlays</span>
+          {OVERLAYS.map((o) => {
+            const on = overlays.has(o.id);
+            return (
+              <button
+                key={o.id}
+                onClick={() => toggleOverlay(o.id)}
+                disabled={!ready}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 transition disabled:opacity-50 ${
+                  on ? "border-transparent bg-ink text-parchment" : "border-line bg-white text-ink hover:border-gold"
+                }`}
+              >
+                <span className="inline-block h-2 w-2 rounded-full" style={{ background: on ? "#ffffff" : o.color }} />
+                {o.label}
+              </button>
+            );
+          })}
+          {overlays.size > 0 ? (
+            <span className="ml-auto text-muted/80">
+              {OVERLAYS.filter((o) => overlays.has(o.id)).map((o) => o.attribution).join(" · ")} — advisory
+            </span>
+          ) : null}
+        </div>
 
         {activeTool === "well" || activeTool === "septic" ? (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-gold/5 px-3 py-1.5 text-xs">
