@@ -47,8 +47,8 @@ const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
 
 const TOOL_ORDER: FeatureKind[] = ["parcel", "house", "well", "septic", "leachfield", "road"];
 
-// Placed items you can drag to reposition (parcel/envelope/road are fixed/computed).
-const MOVEABLE: FeatureKind[] = ["house", "well", "septic", "leachfield"];
+// Placed items you can drag to reposition (parcel/envelope are fixed/computed).
+const MOVEABLE: FeatureKind[] = ["house", "well", "septic", "leachfield", "road"];
 
 /* ---- Render a saved feature (4326 GeoJSON) as a Google overlay ------------- */
 
@@ -78,17 +78,13 @@ function drawFeature(
   if (f.geojson.type === "LineString") {
     const path = (f.geojson.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
     if (f.kind === "road") {
-      // Driveway: a casing (light edge) under a fill, so it reads as a paved
-      // ribbon on the aerial rather than a thin line. Two polylines behind one
-      // MVCObject-like handle so the existing overlay add/remove path still works.
+      // Driveway: a light casing under the editable fill line, so it reads as a
+      // paved ribbon. The fill is the real overlay (draggable whole + editable
+      // vertices when idle); the casing follows it. removeOverlay clears both.
       const casing = new g.maps.Polyline({ path, map, clickable: false, strokeColor: "#efe7d6", strokeWeight: 9, strokeOpacity: 0.95, zIndex: 1 });
       const fill = new g.maps.Polyline({ path, map, clickable: false, strokeColor: "#8a7a5c", strokeWeight: 5, strokeOpacity: 1, zIndex: 2 });
-      return {
-        setMap: (m: google.maps.Map | null) => {
-          casing.setMap(m);
-          fill.setMap(m);
-        },
-      } as unknown as google.maps.MVCObject;
+      (fill as unknown as { __casing: google.maps.Polyline }).__casing = casing;
+      return fill;
     }
     return new g.maps.Polyline({
       path,
@@ -192,6 +188,7 @@ export default function Studio({
   const removeOverlay = useCallback((id: string) => {
     const ov = overlaysRef.current.get(id);
     if (ov) {
+      (ov as unknown as { __casing?: google.maps.Polyline }).__casing?.setMap(null);
       (ov as unknown as { setMap: (m: null) => void }).setMap(null);
       overlaysRef.current.delete(id);
     }
@@ -210,6 +207,11 @@ export default function Studio({
           const ring = path.map((p) => [p.lng(), p.lat()] as [number, number]);
           ring.push(ring[0]);
           geojson = { type: "Polygon", coordinates: [ring] };
+        }
+      } else if (f.geojson.type === "LineString") {
+        const path = (ov as google.maps.Polyline).getPath().getArray();
+        if (path.length >= 2) {
+          geojson = { type: "LineString", coordinates: path.map((p) => [p.lng(), p.lat()] as [number, number]) };
         }
       }
       if (!geojson) return;
@@ -235,8 +237,25 @@ export default function Studio({
       overlaysRef.current.set(f.id, ov);
       if (MOVEABLE.includes(f.kind)) {
         const idle = !activeToolRef.current && !placeDesignIdRef.current && !frontageModeRef.current;
-        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.({ clickable: idle, draggable: idle });
+        const opts: Record<string, boolean> = { clickable: idle, draggable: idle };
+        if (f.kind === "road") opts.editable = idle; // draggable vertex handles too
+        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.(opts);
         g.maps.event.addListener(ov, "dragend", () => void onFeatureDragEnd(f, ov));
+        if (f.kind === "road") {
+          // Keep the casing under the fill in sync while dragging the whole line
+          // or editing a vertex, and persist on vertex edits.
+          const casing = (ov as unknown as { __casing?: google.maps.Polyline }).__casing;
+          const line = ov as google.maps.Polyline;
+          const sync = () => casing?.setPath(line.getPath());
+          g.maps.event.addListener(line, "drag", sync);
+          const path = line.getPath();
+          (["set_at", "insert_at", "remove_at"] as const).forEach((ev) =>
+            g.maps.event.addListener(path, ev, () => {
+              sync();
+              void onFeatureDragEnd(f, ov);
+            }),
+          );
+        }
       }
     },
     [onFeatureDragEnd],
@@ -731,7 +750,9 @@ export default function Studio({
     overlaysRef.current.forEach((ov, id) => {
       const f = featuresRef.current.find((x) => x.id === id);
       if (f && MOVEABLE.includes(f.kind)) {
-        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.({ clickable: idle, draggable: idle });
+        const opts: Record<string, boolean> = { clickable: idle, draggable: idle };
+        if (f.kind === "road") opts.editable = idle;
+        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.(opts);
       }
     });
   }, [activeTool, placeDesignId, frontageMode]);
@@ -1111,7 +1132,7 @@ export default function Studio({
         <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Placed on site</h3>
           {features.some((f) => MOVEABLE.includes(f.kind)) ? (
-            <p className="mt-1 text-xs text-muted/80">Tip: drag a house, well, or septic on the map to move it.</p>
+            <p className="mt-1 text-xs text-muted/80">Tip: drag a house, well, septic, or driveway on the map to move it.</p>
           ) : null}
           {features.length === 0 ? (
             <p className="mt-2 text-sm text-muted">Nothing placed yet.</p>

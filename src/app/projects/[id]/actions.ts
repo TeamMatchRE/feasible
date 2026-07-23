@@ -201,6 +201,9 @@ export async function moveFeature(
           from feasible.septic_systems s
           where lf.id = ${id} and s.id = lf.septic_id and s.project_id = ${projectId}`;
         break;
+      case "road":
+        await sql`update feasible.road_segments set geom = ${toGeom(geojson)} where id = ${id} and project_id = ${projectId}`;
+        break;
       default:
         return { ok: false, error: "That feature can't be moved." };
     }
