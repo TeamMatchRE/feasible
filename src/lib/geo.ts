@@ -103,30 +103,65 @@ export function ruleLabel(key: string): string {
   return RULES.find((r) => r.rule_key === key)?.label ?? EXTRA_LABELS[key] ?? key;
 }
 
+/** [lng, lat] in EPSG:4326. */
+export type LngLat = [number, number];
+
+const R_FT = 20925721.784; // mean Earth radius in feet
+const rad = (d: number) => (d * Math.PI) / 180;
+
+/** Great-circle distance between two 4326 points, in feet. */
+export function distFt(a: LngLat, b: LngLat): number {
+  const dLat = rad(b[1] - a[1]);
+  const dLng = rad(b[0] - a[0]);
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[1])) * Math.cos(rad(b[1])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R_FT * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 /**
  * Per-edge lengths of a closed 4326 ring, in feet, with each segment's midpoint
  * (for on-map dimension labels like the MLS "302 ft / 434 ft" annotations).
- * Uses the haversine great-circle distance — plenty accurate at parcel scale
- * and avoids pulling in Google's geometry library (the loader ships with none).
  */
-export function ringEdgesFt(
-  ring: [number, number][],
-): { mid: [number, number]; ft: number }[] {
-  const R_FT = 20925721.784; // mean Earth radius in feet
-  const rad = (d: number) => (d * Math.PI) / 180;
-  const out: { mid: [number, number]; ft: number }[] = [];
+export function ringEdgesFt(ring: LngLat[]): { mid: LngLat; ft: number }[] {
+  const out: { mid: LngLat; ft: number }[] = [];
   for (let i = 0; i < ring.length - 1; i++) {
-    const [lng1, lat1] = ring[i];
-    const [lng2, lat2] = ring[i + 1];
-    const dLat = rad(lat2 - lat1);
-    const dLng = rad(lng2 - lng1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2;
-    const ft = 2 * R_FT * Math.asin(Math.min(1, Math.sqrt(a)));
-    out.push({ mid: [(lng1 + lng2) / 2, (lat1 + lat2) / 2], ft });
+    out.push({
+      mid: [(ring[i][0] + ring[i + 1][0]) / 2, (ring[i][1] + ring[i + 1][1]) / 2],
+      ft: distFt(ring[i], ring[i + 1]),
+    });
   }
   return out;
+}
+
+/**
+ * Closest point on segment a–b to p, plus its distance in feet. Works in a local
+ * equirectangular projection centred on p (accurate at site scale, no Google lib).
+ */
+export function nearestOnSegment(p: LngLat, a: LngLat, b: LngLat): { point: LngLat; ft: number } {
+  const fpdLat = (R_FT * Math.PI) / 180;
+  const fpdLng = fpdLat * Math.cos(rad(p[1]));
+  const xy = (q: LngLat): [number, number] => [(q[0] - p[0]) * fpdLng, (q[1] - p[1]) * fpdLat];
+  const ax = xy(a);
+  const bx = xy(b);
+  const dx = bx[0] - ax[0];
+  const dy = bx[1] - ax[1];
+  const len2 = dx * dx + dy * dy;
+  // p is the origin (0,0); project it onto the segment.
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, -(ax[0] * dx + ax[1] * dy) / len2));
+  const cx = ax[0] + t * dx;
+  const cy = ax[1] + t * dy;
+  const point: LngLat = [p[0] + cx / fpdLng, p[1] + cy / fpdLat];
+  return { point, ft: Math.hypot(cx, cy) };
+}
+
+/** Closest point on a closed ring's boundary to p, with distance in feet. */
+export function nearestOnRing(p: LngLat, ring: LngLat[]): { point: LngLat; ft: number } | null {
+  let best: { point: LngLat; ft: number } | null = null;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const c = nearestOnSegment(p, ring[i], ring[i + 1]);
+    if (!best || c.ft < best.ft) best = c;
+  }
+  return best;
 }
 
 /** Overall verdict from a set of validation rows. */

@@ -10,10 +10,13 @@ import {
   fmtFt,
   fmtSf,
   ringEdgesFt,
+  distFt,
+  nearestOnRing,
   type FeatureKind,
   type PlacedFeature,
   type GeoJSONGeometry,
   type ValidationRow,
+  type LngLat,
 } from "@/lib/geo";
 import type { ParcelInfo } from "@/lib/queries";
 import {
@@ -123,6 +126,9 @@ export default function Studio({
   // Edge dimension labels + frontage-tag markers, kept apart from feature overlays.
   const dimLabelsRef = useRef<google.maps.Marker[]>([]);
   const edgeMarkersRef = useRef<google.maps.Marker[]>([]);
+  // Live distance "rubber-band" shown while placing a well/septic.
+  const measureLineRef = useRef<google.maps.Polyline | null>(null);
+  const measureLabelRef = useRef<google.maps.Marker | null>(null);
 
   const [ready, setReady] = useState(false);
   const [features, setFeatures] = useState<PlacedFeature[]>(initialFeatures);
@@ -136,6 +142,8 @@ export default function Studio({
   const [parcel, setParcel] = useState<ParcelInfo | null>(initialParcel);
   const [hasEnvelope, setHasEnvelope] = useState(initialHasEnvelope);
   const [frontageMode, setFrontageMode] = useState(false);
+  // Live distances (to the pair feature / property line / house) while placing.
+  const [liveMeasure, setLiveMeasure] = useState<{ label: string; ft: number; min?: number }[]>([]);
 
   const activeToolRef = useRef<FeatureKind | null>(null);
   const bedroomsRef = useRef(3);
@@ -408,6 +416,104 @@ export default function Studio({
     setMsg("Building envelope updated.");
   }, [projectId, applyEnvelope]);
 
+  // ---- Live distance measuring while placing a well/septic ----------------
+
+  const clearMeasure = useCallback(() => {
+    measureLineRef.current?.setMap(null);
+    measureLineRef.current = null;
+    measureLabelRef.current?.setMap(null);
+    measureLabelRef.current = null;
+    setLiveMeasure([]);
+  }, []);
+
+  const onMapMove = useCallback(
+    (latLng: google.maps.LatLng) => {
+      const g = gRef.current;
+      const map = mapRef.current;
+      const tool = activeToolRef.current;
+      if (!g || !map) return;
+      if (tool !== "well" && tool !== "septic") {
+        if (measureLineRef.current) clearMeasure();
+        return;
+      }
+      const cursor: LngLat = [latLng.lng(), latLng.lat()];
+      const feats = featuresRef.current;
+      const pairKind: FeatureKind = tool === "well" ? "septic" : "well";
+
+      // Nearest existing pair feature (well↔septic, the 75 ft rule).
+      let nearestPair: { pt: LngLat; ft: number } | null = null;
+      for (const f of feats) {
+        if (f.kind === pairKind && f.geojson.type === "Point") {
+          const pt = f.geojson.coordinates as LngLat;
+          const ft = distFt(cursor, pt);
+          if (!nearestPair || ft < nearestPair.ft) nearestPair = { pt, ft };
+        }
+      }
+      // Nearest point on any placed house.
+      let nearestHouse: { pt: LngLat; ft: number } | null = null;
+      for (const f of feats) {
+        if (f.kind === "house" && f.geojson.type === "Polygon") {
+          const ring = (f.geojson.coordinates as LngLat[][])[0];
+          const c = nearestOnRing(cursor, ring);
+          if (c && (!nearestHouse || c.ft < nearestHouse.ft)) nearestHouse = { pt: c.point, ft: c.ft };
+        }
+      }
+      // Nearest point on the property line.
+      let nearestPL: { pt: LngLat; ft: number } | null = null;
+      const parcelF = feats.find((f) => f.kind === "parcel" && f.geojson.type === "Polygon");
+      if (parcelF) {
+        const ring = (parcelF.geojson.coordinates as LngLat[][])[0];
+        const c = nearestOnRing(cursor, ring);
+        if (c) nearestPL = { pt: c.point, ft: c.ft };
+      }
+
+      // Primary rubber-band anchor: the house if placed (David's flow), else the
+      // pair feature, else the property line.
+      const primary = nearestHouse ?? nearestPair ?? nearestPL;
+      if (primary) {
+        const from = primary.pt;
+        // Colour the label by the governing 75 ft pair rule when a pair exists.
+        const ok = nearestPair ? nearestPair.ft >= 75 : true;
+        const path = [
+          { lat: from[1], lng: from[0] },
+          { lat: cursor[1], lng: cursor[0] },
+        ];
+        if (!measureLineRef.current) {
+          measureLineRef.current = new g.maps.Polyline({
+            map,
+            clickable: false,
+            strokeColor: "#1b2a44",
+            strokeOpacity: 0,
+            icons: [{ icon: { path: "M 0,-1 0,1", strokeOpacity: 0.9, scale: 2 }, offset: "0", repeat: "8px" }],
+          });
+        }
+        measureLineRef.current.setPath(path);
+        const mid = { lat: (from[1] + cursor[1]) / 2, lng: (from[0] + cursor[0]) / 2 };
+        if (!measureLabelRef.current) {
+          measureLabelRef.current = new g.maps.Marker({
+            map,
+            clickable: false,
+            icon: { path: "M 0,0 0,0", strokeOpacity: 0, scale: 0 },
+          });
+        }
+        measureLabelRef.current.setPosition(mid);
+        measureLabelRef.current.setLabel({
+          text: `${Math.round(primary.ft)} ft`,
+          color: ok ? "#1b2a44" : "#a11616",
+          fontSize: "12px",
+          fontWeight: "700",
+        });
+      }
+
+      const rows: { label: string; ft: number; min?: number }[] = [];
+      if (nearestPair) rows.push({ label: `to ${pairKind === "septic" ? "septic tank" : "well"}`, ft: Math.round(nearestPair.ft), min: 75 });
+      if (nearestPL) rows.push({ label: "to property line", ft: Math.round(nearestPL.ft), min: 25 });
+      if (nearestHouse) rows.push({ label: "to house", ft: Math.round(nearestHouse.ft) });
+      setLiveMeasure(rows);
+    },
+    [clearMeasure],
+  );
+
   // A map click: place a point immediately, or add a polygon/line vertex.
   const onMapClick = useCallback(
     (latLng: google.maps.LatLng) => {
@@ -416,6 +522,7 @@ export default function Studio({
       const meta = KIND_META[kind];
       if (meta.geom === "Point") {
         setActiveTool(null);
+        clearMeasure();
         void save(kind, { type: "Point", coordinates: [latLng.lng(), latLng.lat()] });
         return;
       }
@@ -423,7 +530,7 @@ export default function Studio({
       setDraftCount(draftRef.current.points.length);
       redrawDraft(kind);
     },
-    [save, redrawDraft],
+    [save, redrawDraft, clearMeasure],
   );
 
   const finishDraft = useCallback(() => {
@@ -469,6 +576,10 @@ export default function Studio({
         });
         // Double-click finishes an in-progress polygon/line.
         map.addListener("dblclick", () => finishDraft());
+        // Live distance readout while placing a well/septic.
+        map.addListener("mousemove", (e: google.maps.MapMouseEvent) => {
+          if (e.latLng) onMapMove(e.latLng);
+        });
 
         // Draw existing features + frame to the parcel if present.
         const bounds = new g.maps.LatLngBounds();
@@ -504,6 +615,7 @@ export default function Studio({
 
   function pickTool(kind: FeatureKind) {
     clearDraft();
+    clearMeasure();
     setMsg(null);
     setActiveTool((cur) => (cur === kind ? null : kind));
   }
@@ -616,6 +728,20 @@ export default function Studio({
             Click to drop each corner{activeGeom === "Polygon" ? " of the shape" : " of the line"}; double-click or{" "}
             <span className="font-medium">Finish</span> to complete.
             {draftCount ? ` (${draftCount} point${draftCount === 1 ? "" : "s"})` : ""}
+          </div>
+        ) : null}
+
+        {activeTool === "well" || activeTool === "septic" ? (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-gold/5 px-3 py-1.5 text-xs">
+            <span className="text-gold-deep">
+              Move over the map to measure; click to place the {KIND_META[activeTool].label.toLowerCase()}.
+            </span>
+            {liveMeasure.map((m) => (
+              <span key={m.label} className={m.min != null && m.ft < m.min ? "font-semibold text-fail" : "text-ink"}>
+                {m.label}: <span className="num">{m.ft} ft</span>
+                {m.min != null ? <span className="text-muted"> (min {m.min})</span> : null}
+              </span>
+            ))}
           </div>
         ) : null}
 
