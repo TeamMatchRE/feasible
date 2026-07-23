@@ -1,14 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { saveRate, addComponent, removeComponent } from "./actions";
 import type { CostCatalog, CostItem, Tier } from "@/lib/costs";
 
 const UNITS = ["EA", "LF", "SF", "SY", "CY", "TON", "GAL", "LS", "HR"] as const;
 const TIERS: Tier[] = ["Base", "Upgraded", "Superior"];
+const SECTIONS = ["Building Components", "Infrastructure"] as const;
+type Section = (typeof SECTIONS)[number];
+
+const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
 
 export default function CostGrid({ catalog }: { catalog: CostCatalog }) {
   const [items, setItems] = useState<CostItem[]>(catalog.items);
+  const [tab, setTab] = useState<Section>("Building Components");
   const [msg, setMsg] = useState<string | null>(null);
   const profileId = (t: Tier) => catalog.profiles.find((p) => p.name === t)?.id ?? "";
 
@@ -24,14 +29,39 @@ export default function CostGrid({ catalog }: { catalog: CostCatalog }) {
     await removeComponent(itemId);
   }
 
-  // Group rows by category for display.
-  const grouped = items.reduce<Record<string, CostItem[]>>((acc, it) => {
+  const inTab = useMemo(() => items.filter((it) => (it.section || "Building Components") === tab), [items, tab]);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { "Building Components": 0, Infrastructure: 0 };
+    for (const it of items) c[(it.section || "Building Components")] = (c[it.section || "Building Components"] ?? 0) + 1;
+    return c;
+  }, [items]);
+
+  // Group the active tab's rows by category.
+  const grouped = inTab.reduce<Record<string, CostItem[]>>((acc, it) => {
     (acc[it.category] ??= []).push(it);
     return acc;
   }, {});
 
+  // "Base" total for the tab, illustrative — sums only per-unit-agnostic feel: we
+  // just sum the Base column so David gets a rough tab subtotal to sanity-check.
+  const baseSum = inTab.reduce((s, it) => s + (it.rates.Base ?? 0), 0);
+
   return (
     <div>
+      <div className="mb-3 flex items-center gap-1 border-b border-line">
+        {SECTIONS.map((s) => (
+          <button
+            key={s}
+            onClick={() => setTab(s)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm transition ${
+              tab === s ? "border-gold font-medium text-ink" : "border-transparent text-muted hover:text-ink"
+            }`}
+          >
+            {s} <span className="text-xs text-muted">({counts[s] ?? 0})</span>
+          </button>
+        ))}
+      </div>
+
       {msg ? <p className="mb-2 text-xs text-fail">{msg}</p> : null}
       <div className="overflow-x-auto rounded-lg border border-line bg-white">
         <table className="w-full min-w-[640px] text-sm">
@@ -50,11 +80,19 @@ export default function CostGrid({ catalog }: { catalog: CostCatalog }) {
               <FragmentGroup key={category} category={category} rows={rows} onRate={onRate} onRemove={onRemove} />
             ))}
           </tbody>
+          <tfoot>
+            <tr className="border-t border-line">
+              <td colSpan={2} className="px-3 py-2 text-right text-xs text-muted">Base column subtotal</td>
+              <td className="px-3 py-2 text-right font-medium text-ink">{money(baseSum)}</td>
+              <td colSpan={3} className="px-3 py-2 text-xs italic text-muted/70">unit-mixed — rough guide only</td>
+            </tr>
+          </tfoot>
         </table>
       </div>
-      <AddRow />
+      <AddRow section={tab} />
       <p className="mt-3 text-xs italic text-muted/80">
-        Illustrative baseline (rough US residential) — edit to your real numbers. $ per the listed unit.
+        Illustrative baseline (rough US residential, not your 21HVT actuals) — edit to your real
+        numbers. $ per the listed unit; LS = lump sum.
       </p>
     </div>
   );
@@ -100,7 +138,7 @@ function FragmentGroup({
   );
 }
 
-function AddRow() {
+function AddRow({ section }: { section: Section }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({ category: "", name: "", unit: "EA", base: "", upgraded: "", superior: "" });
   const [busy, setBusy] = useState(false);
@@ -108,7 +146,7 @@ function AddRow() {
   if (!open) {
     return (
       <button onClick={() => setOpen(true)} className="mt-3 text-sm text-gold-deep hover:underline">
-        + Add component
+        + Add {section === "Infrastructure" ? "infrastructure" : "building"} component
       </button>
     );
   }
@@ -117,13 +155,14 @@ function AddRow() {
     <form
       action={async () => {
         setBusy(true);
-        await addComponent({ category: f.category, name: f.name, unit: f.unit, base: n(f.base), upgraded: n(f.upgraded), superior: n(f.superior) });
+        await addComponent({ section, category: f.category, name: f.name, unit: f.unit, base: n(f.base), upgraded: n(f.upgraded), superior: n(f.superior) });
         setBusy(false);
         setOpen(false);
         setF({ category: "", name: "", unit: "EA", base: "", upgraded: "", superior: "" });
       }}
       className="mt-3 flex flex-wrap items-end gap-2 rounded-lg border border-line bg-parchment/40 p-3 text-xs"
     >
+      <span className="w-full text-xs text-muted">Adding to <strong className="text-ink">{section}</strong></span>
       <label className="flex flex-col gap-1 text-muted">Category<input value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="rounded border border-line px-1.5 py-1 text-ink" /></label>
       <label className="flex flex-col gap-1 text-muted">Component<input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required className="rounded border border-line px-1.5 py-1 text-ink" /></label>
       <label className="flex flex-col gap-1 text-muted">Unit

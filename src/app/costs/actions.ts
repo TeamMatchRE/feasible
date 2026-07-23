@@ -33,14 +33,15 @@ export async function saveRate(itemId: string, profileId: string, cost: number |
 
 /** Add a component (with its Base/Upgraded/Superior rates). */
 export async function addComponent(
-  input: { category: string; name: string; unit: string; base: number | null; upgraded: number | null; superior: number | null },
+  input: { section: string; category: string; name: string; unit: string; base: number | null; upgraded: number | null; superior: number | null },
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const user = await requireUser();
     if (!input.name.trim()) return { ok: false, error: "Name required." };
+    const section = input.section === "Infrastructure" ? "Infrastructure" : "Building Components";
     const [item] = await sql<{ id: string }[]>`
-      insert into feasible.cost_catalog_items (owner_id, category, name, unit)
-      values (${user.id}, ${input.category.trim() || "Other"}, ${input.name.trim()}, ${input.unit}::feasible.unit_of_measure)
+      insert into feasible.cost_catalog_items (owner_id, section, category, name, unit)
+      values (${user.id}, ${section}, ${input.category.trim() || "Other"}, ${input.name.trim()}, ${input.unit}::feasible.unit_of_measure)
       returning id`;
     const profiles = await sql<{ id: string; name: string }[]>`
       select id, name from feasible.cost_profiles where owner_id = ${user.id}`;
