@@ -70,6 +70,19 @@ function drawFeature(
   }
   if (f.geojson.type === "LineString") {
     const path = (f.geojson.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
+    if (f.kind === "road") {
+      // Driveway: a casing (light edge) under a fill, so it reads as a paved
+      // ribbon on the aerial rather than a thin line. Two polylines behind one
+      // MVCObject-like handle so the existing overlay add/remove path still works.
+      const casing = new g.maps.Polyline({ path, map, clickable: false, strokeColor: "#efe7d6", strokeWeight: 9, strokeOpacity: 0.95, zIndex: 1 });
+      const fill = new g.maps.Polyline({ path, map, clickable: false, strokeColor: "#8a7a5c", strokeWeight: 5, strokeOpacity: 1, zIndex: 2 });
+      return {
+        setMap: (m: google.maps.Map | null) => {
+          casing.setMap(m);
+          fill.setMap(m);
+        },
+      } as unknown as google.maps.MVCObject;
+    }
     return new g.maps.Polyline({
       path,
       map,
