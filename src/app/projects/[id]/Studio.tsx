@@ -28,7 +28,9 @@ import {
   proposeZoningFromSearch,
   checkFlood,
   checkWetlands,
+  checkElevation,
   type ZoningInput,
+  type ElevationReport,
 } from "./actions";
 import type { FloodReport } from "@/lib/flood";
 import type { WetlandsReport } from "@/lib/wetlands";
@@ -718,6 +720,7 @@ export default function Studio({
 
         <FloodCard projectId={projectId} />
         <WetlandsCard projectId={projectId} />
+        <ElevationCard projectId={projectId} />
 
         <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Setback checks</h3>
@@ -1051,6 +1054,70 @@ function FloodCard({ projectId }: { projectId: string }) {
         </div>
       ) : !err ? (
         <p className="mt-2 text-xs text-muted">Check the FEMA flood zone for this site.</p>
+      ) : null}
+    </section>
+  );
+}
+
+function ElevationCard({ projectId }: { projectId: string }) {
+  const [report, setReport] = useState<ElevationReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setErr(null);
+    const res = await checkElevation(projectId);
+    setBusy(false);
+    if (!res.ok || !res.report) {
+      setErr(res.error ?? "Elevation lookup failed.");
+      return;
+    }
+    setReport(res.report);
+  }
+
+  const featLabel: Record<string, string> = { well: "Well", septic: "Septic tank", house: "House" };
+
+  return (
+    <section className="rounded-lg border border-line bg-white p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-display text-lg text-ink">Elevation &amp; slope</h3>
+        <button
+          onClick={() => void run()}
+          disabled={busy}
+          className="rounded-md border border-line px-2.5 py-1 text-xs text-ink transition hover:border-gold disabled:opacity-50"
+        >
+          {busy ? "Sampling…" : report ? "Re-check" : "Check elevation"}
+        </button>
+      </div>
+      {err ? <p className="mt-2 text-xs text-fail">{err}</p> : null}
+      {report ? (
+        <div className="mt-3 space-y-2 text-sm">
+          {report.site ? (
+            <div>
+              <p className="text-ink">
+                Site relief <span className="font-medium">{report.site.reliefFt} ft</span>
+              </p>
+              <p className="text-xs text-muted">
+                Low {report.site.lowFt} ft · High {report.site.highFt} ft
+                {report.site.centroidFt != null ? ` · Center ${report.site.centroidFt} ft` : ""}
+              </p>
+            </div>
+          ) : null}
+          {report.features.length > 0 ? (
+            <ul className="space-y-0.5 border-t border-line/60 pt-2">
+              {report.features.map((f, i) => (
+                <li key={`${f.kind}-${i}`} className="flex justify-between text-xs">
+                  <span className="text-ink">{f.label || featLabel[f.kind] || f.kind}</span>
+                  <span className="num text-muted">{f.elevFt != null ? `${f.elevFt} ft` : "—"}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="text-xs italic text-muted/80">USGS 3DEP — LiDAR-derived, advisory (not a survey).</p>
+        </div>
+      ) : !err ? (
+        <p className="mt-2 text-xs text-muted">Ground elevation at each feature + the site&rsquo;s high/low relief.</p>
       ) : null}
     </section>
   );

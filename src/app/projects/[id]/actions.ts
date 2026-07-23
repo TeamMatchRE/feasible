@@ -7,6 +7,7 @@ import { fetchParcelAt } from "@/lib/parcels";
 import { proposeFromPdf, proposeFromWebSearch, type ProposeResult } from "@/lib/zoning";
 import { fetchFloodAt, type FloodReport } from "@/lib/flood";
 import { fetchWetlandsForParcel, type WetlandsReport } from "@/lib/wetlands";
+import { fetchElevations } from "@/lib/elevation";
 import {
   RULES,
   HOUSE_IN_ENVELOPE,
@@ -264,6 +265,86 @@ export async function checkFlood(projectId: string): Promise<FloodResult> {
     return { ok: true, report };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Flood lookup failed." };
+  }
+}
+
+export interface ElevationReport {
+  /** Site relief from sampling the parcel outline + centroid. Null if no parcel. */
+  site: { lowFt: number; highFt: number; reliefFt: number; centroidFt: number | null } | null;
+  /** Spot elevation at each placed well/septic/house. */
+  features: { kind: string; label: string | null; elevFt: number | null }[];
+}
+export interface ElevationResult {
+  ok: boolean;
+  report?: ElevationReport;
+  error?: string;
+}
+
+/**
+ * Ground elevations (USGS 3DEP) at the placed features, plus the site's high/low
+ * relief from sampling the parcel outline. Advisory / ephemeral.
+ */
+export async function checkElevation(projectId: string): Promise<ElevationResult> {
+  try {
+    await assertOwner(projectId);
+
+    // Parcel ring + centroid (4326) for the relief sample.
+    const [parcel] = await sql<{ ring: string; cx: number | null; cy: number | null }[]>`
+      select ${sql.unsafe("ST_AsGeoJSON(ST_Transform(geom, 4326))")} as ring,
+             st_x(st_transform(st_centroid(geom), 4326)) as cx,
+             st_y(st_transform(st_centroid(geom), 4326)) as cy
+      from feasible.parcels where project_id = ${projectId} limit 1`;
+
+    // Placed features as single points (house = its centroid).
+    const feats = await sql<{ kind: string; label: string | null; x: number; y: number }[]>`
+      select 'well' as kind, label, st_x(g) as x, st_y(g) as y
+        from (select label, st_transform(geom, 4326) as g from feasible.wells where project_id = ${projectId}) w
+      union all
+      select 'septic', label, st_x(g), st_y(g)
+        from (select label, st_transform(geom, 4326) as g from feasible.septic_systems where project_id = ${projectId}) s
+      union all
+      select 'house', label, st_x(st_centroid(g)), st_y(st_centroid(g))
+        from (select label, st_transform(geom, 4326) as g from feasible.template_placements where project_id = ${projectId}) h`;
+
+    if (!parcel && feats.length === 0) {
+      return { ok: false, error: "Nothing placed yet — pull the parcel or drop a feature first." };
+    }
+
+    // Sample points: up to ~10 evenly-spaced parcel-outline vertices + centroid, then features.
+    const outline: { lat: number; lng: number }[] = [];
+    if (parcel?.ring) {
+      const ring = (JSON.parse(parcel.ring) as { coordinates: number[][][] }).coordinates?.[0] ?? [];
+      const step = Math.max(1, Math.floor(ring.length / 10));
+      for (let i = 0; i < ring.length - 1; i += step) outline.push({ lng: ring[i][0], lat: ring[i][1] });
+    }
+    const centroidPt = parcel?.cx != null && parcel?.cy != null ? [{ lat: parcel.cy, lng: parcel.cx }] : [];
+    const featPts = feats.map((f) => ({ lat: f.y, lng: f.x }));
+
+    const all = await fetchElevations([...outline, ...centroidPt, ...featPts]);
+    const outlineElev = all.slice(0, outline.length).filter((v): v is number => v != null);
+    const centroidFt = centroidPt.length ? all[outline.length] ?? null : null;
+    const featElev = all.slice(outline.length + centroidPt.length);
+
+    const siteVals = [...outlineElev, ...(centroidFt != null ? [centroidFt] : [])];
+    const site =
+      siteVals.length > 0
+        ? {
+            lowFt: Math.min(...siteVals),
+            highFt: Math.max(...siteVals),
+            reliefFt: Math.round((Math.max(...siteVals) - Math.min(...siteVals)) * 10) / 10,
+            centroidFt,
+          }
+        : null;
+
+    return {
+      ok: true,
+      report: {
+        site,
+        features: feats.map((f, i) => ({ kind: f.kind, label: f.label, elevFt: featElev[i] ?? null })),
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Elevation lookup failed." };
   }
 }
 
