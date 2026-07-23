@@ -33,11 +33,13 @@ import {
   checkFlood,
   checkWetlands,
   checkElevation,
+  placeDesign,
   type ZoningInput,
   type ElevationReport,
 } from "./actions";
 import type { FloodReport } from "@/lib/flood";
 import type { WetlandsReport } from "@/lib/wetlands";
+import type { PlaceableDesign } from "@/lib/queries";
 
 // Default frame: north-central CT, until a project has a center or a parcel.
 const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
@@ -123,6 +125,7 @@ export default function Studio({
   initialValidations,
   initialParcel,
   initialHasEnvelope,
+  designs,
 }: {
   projectId: string;
   address: string | null;
@@ -131,6 +134,7 @@ export default function Studio({
   initialValidations: ValidationRow[];
   initialParcel: ParcelInfo | null;
   initialHasEnvelope: boolean;
+  designs: PlaceableDesign[];
 }) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const gRef = useRef<typeof google | null>(null);
@@ -161,6 +165,14 @@ export default function Studio({
   // Live distances (to the pair feature / property line / house) while placing.
   const [liveMeasure, setLiveMeasure] = useState<{ label: string; ft: number; min?: number }[]>([]);
   const [overlays, setOverlays] = useState<Set<OverlayId>>(new Set());
+  // Place-a-design mode: the next map click drops the chosen design's footprint.
+  const [placeDesignId, setPlaceDesignId] = useState<string>("");
+  const [placeRotation, setPlaceRotation] = useState(0);
+  const [placing, setPlacing] = useState(false);
+  const placeDesignIdRef = useRef("");
+  const placeRotationRef = useRef(0);
+  placeDesignIdRef.current = placeDesignId;
+  placeRotationRef.current = placeRotation;
 
   const activeToolRef = useRef<FeatureKind | null>(null);
   const bedroomsRef = useRef(3);
@@ -531,9 +543,40 @@ export default function Studio({
     [clearMeasure],
   );
 
+  // Drop the chosen design's footprint at the clicked point.
+  const dropDesign = useCallback(
+    async (latLng: google.maps.LatLng) => {
+      const g = gRef.current;
+      const map = mapRef.current;
+      if (!g || !map) return;
+      setPlacing(true);
+      setMsg(null);
+      const res = await placeDesign(
+        projectId,
+        placeDesignIdRef.current,
+        { lat: latLng.lat(), lng: latLng.lng() },
+        placeRotationRef.current,
+      );
+      setPlacing(false);
+      if (!res.ok || !res.feature) {
+        setMsg(res.error ?? "Could not place the design.");
+        return;
+      }
+      const f = res.feature;
+      setFeatures((prev) => [...prev, f]);
+      overlaysRef.current.set(f.id, drawFeature(g, map, f));
+      setPlaceDesignId(""); // one drop, then exit place mode
+    },
+    [projectId],
+  );
+
   // A map click: place a point immediately, or add a polygon/line vertex.
   const onMapClick = useCallback(
     (latLng: google.maps.LatLng) => {
+      if (placeDesignIdRef.current && !busyRef.current) {
+        void dropDesign(latLng);
+        return;
+      }
       const kind = activeToolRef.current;
       if (!kind || busyRef.current) return;
       const meta = KIND_META[kind];
@@ -547,7 +590,7 @@ export default function Studio({
       setDraftCount(draftRef.current.points.length);
       redrawDraft(kind);
     },
-    [save, redrawDraft, clearMeasure],
+    [save, redrawDraft, clearMeasure, dropDesign],
   );
 
   const finishDraft = useCallback(() => {
@@ -802,6 +845,50 @@ export default function Studio({
             </span>
           ) : null}
         </div>
+
+        {designs.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-line bg-white px-3 py-1.5 text-xs">
+            <span className="text-muted">Place design</span>
+            <select
+              value={placeDesignId}
+              onChange={(e) => {
+                setPlaceDesignId(e.target.value);
+                if (e.target.value) {
+                  setActiveTool(null);
+                  clearDraft();
+                  clearMeasure();
+                }
+              }}
+              disabled={!ready}
+              className="rounded border border-line bg-white px-2 py-0.5 text-ink disabled:opacity-50"
+            >
+              <option value="">Choose a design…</option>
+              {designs.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            {placeDesignId ? (
+              <>
+                <label className="flex items-center gap-1 text-muted">
+                  Rotate
+                  <input
+                    type="number"
+                    value={placeRotation}
+                    onChange={(e) => setPlaceRotation(Number(e.target.value))}
+                    className="w-14 rounded border border-line px-1 py-0.5 text-ink"
+                  />
+                  °
+                </label>
+                <span className="text-gold-deep">{placing ? "Placing…" : "Click the map to drop it."}</span>
+                <button onClick={() => setPlaceDesignId("")} className="text-muted transition hover:text-ink">
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <span className="text-muted/70">Drops the design&rsquo;s footprint at your click.</span>
+            )}
+          </div>
+        ) : null}
 
         {activeTool === "well" || activeTool === "septic" ? (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-gold/5 px-3 py-1.5 text-xs">

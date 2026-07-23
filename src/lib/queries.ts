@@ -23,6 +23,24 @@ export async function listDesigns(ownerId: string): Promise<DesignSummary[]> {
     order by updated_at desc`;
 }
 
+export interface PlaceableDesign {
+  id: string;
+  name: string;
+  footprint_width_ft: number | null;
+  footprint_depth_ft: number | null;
+  living_area_sf: number | null;
+}
+
+/** Designs that can be dropped on a study (need a footprint or a living area to size from). */
+export async function listPlaceableDesigns(ownerId: string): Promise<PlaceableDesign[]> {
+  return sql<PlaceableDesign[]>`
+    select id, name, footprint_width_ft, footprint_depth_ft, living_area_sf
+    from feasible.building_templates
+    where owner_id = ${ownerId}
+      and (footprint_width_ft is not null or living_area_sf is not null)
+    order by updated_at desc`;
+}
+
 export interface DesignTakeoffRow {
   category: string;
   description: string | null;

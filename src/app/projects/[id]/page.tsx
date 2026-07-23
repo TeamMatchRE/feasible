@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import Shell from "@/components/Shell";
 import Studio from "./Studio";
 import { requireUser } from "@/lib/session";
-import { loadProject } from "@/lib/queries";
+import { loadProject, listPlaceableDesigns } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +15,7 @@ export default async function ProjectPage({
   const user = await requireUser(`/projects/${id}`);
   const project = await loadProject(id, user.id);
   if (!project) notFound();
+  const designs = await listPlaceableDesigns(user.id);
 
   const center =
     project.center_lat != null && project.center_lng != null
@@ -40,6 +41,7 @@ export default async function ProjectPage({
         initialValidations={project.validations}
         initialParcel={project.parcel}
         initialHasEnvelope={project.hasEnvelope}
+        designs={designs}
       />
     </Shell>
   );

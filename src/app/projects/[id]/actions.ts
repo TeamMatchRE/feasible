@@ -125,6 +125,54 @@ export async function saveFeature(
   }
 }
 
+/**
+ * Drop a saved design's footprint on the study. Builds a width×depth rectangle
+ * (feet, State Plane) centred on the click point and rotated, stored as a
+ * template_placement linked to the design — so it renders as a house and counts
+ * in the house-in-envelope check. Falls back to a square from living area when
+ * the design has no explicit footprint.
+ */
+export async function placeDesign(
+  projectId: string,
+  templateId: string,
+  point: { lat: number; lng: number },
+  rotationDeg: number,
+): Promise<{ ok: boolean; feature?: PlacedFeature; error?: string }> {
+  try {
+    const userId = await assertOwner(projectId);
+    const [tpl] = await sql<
+      { name: string; w: number | null; d: number | null; area: number | null }[]
+    >`
+      select name, footprint_width_ft as w, footprint_depth_ft as d, living_area_sf as area
+      from feasible.building_templates where id = ${templateId} and owner_id = ${userId}`;
+    if (!tpl) return { ok: false, error: "Design not found." };
+
+    let w = tpl.w != null ? Number(tpl.w) : null;
+    let d = tpl.d != null ? Number(tpl.d) : null;
+    if ((w == null || d == null) && tpl.area != null) {
+      const side = Math.sqrt(Number(tpl.area)); // rough square fallback
+      w = w ?? side;
+      d = d ?? side;
+    }
+    if (!w || !d) return { ok: false, error: "Design has no footprint or living area to size from." };
+
+    const [r] = await sql<{ id: string; gj: string }[]>`
+      with c as (select ST_Transform(ST_SetSRID(ST_Point(${point.lng}, ${point.lat}), 4326), 2234) as pt)
+      insert into feasible.template_placements (project_id, template_id, label, geom, rotation_deg)
+      select ${projectId}, ${templateId}, ${tpl.name},
+             ST_Rotate(
+               ST_MakeEnvelope(ST_X(pt) - ${w / 2}, ST_Y(pt) - ${d / 2}, ST_X(pt) + ${w / 2}, ST_Y(pt) + ${d / 2}, 2234),
+               radians(${rotationDeg}), pt)::geometry(Polygon, 2234),
+             ${rotationDeg}
+      from c
+      returning id, ${sql.unsafe(AS_GJ_SQL)} as gj`;
+    await touch(projectId);
+    return { ok: true, feature: { kind: "house", id: r.id, label: tpl.name, geojson: JSON.parse(r.gj) } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not place the design." };
+  }
+}
+
 const KIND_TABLE: Record<FeatureKind, string> = {
   parcel: "feasible.parcels",
   house: "feasible.template_placements",
