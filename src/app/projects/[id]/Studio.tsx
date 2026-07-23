@@ -23,6 +23,7 @@ import { OVERLAYS, type OverlayId } from "@/lib/overlays";
 import {
   saveFeature,
   deleteFeature,
+  moveFeature,
   runFeasibility,
   importParcel,
   setFrontageEdge,
@@ -45,6 +46,9 @@ import type { PlaceableDesign } from "@/lib/queries";
 const CT_DEFAULT = { lat: 41.8, lng: -72.75 };
 
 const TOOL_ORDER: FeatureKind[] = ["parcel", "house", "well", "septic", "leachfield", "road"];
+
+// Placed items you can drag to reposition (parcel/envelope/road are fixed/computed).
+const MOVEABLE: FeatureKind[] = ["house", "well", "septic", "leachfield"];
 
 /* ---- Render a saved feature (4326 GeoJSON) as a Google overlay ------------- */
 
@@ -178,10 +182,12 @@ export default function Studio({
   const bedroomsRef = useRef(3);
   const busyRef = useRef(false);
   const featuresRef = useRef<PlacedFeature[]>(initialFeatures);
+  const frontageModeRef = useRef(false);
   activeToolRef.current = activeTool;
   bedroomsRef.current = bedrooms;
   busyRef.current = busy;
   featuresRef.current = features;
+  frontageModeRef.current = frontageMode;
 
   const removeOverlay = useCallback((id: string) => {
     const ov = overlaysRef.current.get(id);
@@ -190,6 +196,51 @@ export default function Studio({
       overlaysRef.current.delete(id);
     }
   }, []);
+
+  // Persist a dragged feature's new position, and update local state.
+  const onFeatureDragEnd = useCallback(
+    async (f: PlacedFeature, ov: google.maps.MVCObject) => {
+      let geojson: GeoJSONGeometry | null = null;
+      if (f.geojson.type === "Point") {
+        const p = (ov as google.maps.Marker).getPosition();
+        if (p) geojson = { type: "Point", coordinates: [p.lng(), p.lat()] };
+      } else if (f.geojson.type === "Polygon") {
+        const path = (ov as google.maps.Polygon).getPath().getArray();
+        if (path.length >= 3) {
+          const ring = path.map((p) => [p.lng(), p.lat()] as [number, number]);
+          ring.push(ring[0]);
+          geojson = { type: "Polygon", coordinates: [ring] };
+        }
+      }
+      if (!geojson) return;
+      const res = await moveFeature(projectId, f.kind, f.id, geojson);
+      if (!res.ok) {
+        setMsg(res.error ?? "Move failed.");
+        return;
+      }
+      const gj = geojson;
+      setFeatures((prev) => prev.map((x) => (x.id === f.id ? { ...x, geojson: gj } : x)));
+    },
+    [projectId],
+  );
+
+  // Draw a feature and register it — moveable kinds get drag + a dragend save,
+  // draggable only while idle (no draw/place mode) so placement clicks pass through.
+  const addOverlay = useCallback(
+    (f: PlacedFeature) => {
+      const g = gRef.current;
+      const map = mapRef.current;
+      if (!g || !map) return;
+      const ov = drawFeature(g, map, f);
+      overlaysRef.current.set(f.id, ov);
+      if (MOVEABLE.includes(f.kind)) {
+        const idle = !activeToolRef.current && !placeDesignIdRef.current && !frontageModeRef.current;
+        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.({ clickable: idle, draggable: idle });
+        g.maps.event.addListener(ov, "dragend", () => void onFeatureDragEnd(f, ov));
+      }
+    },
+    [onFeatureDragEnd],
+  );
 
   const clearDraft = useCallback(() => {
     const d = draftRef.current;
@@ -267,10 +318,10 @@ export default function Studio({
       const f = res.feature;
       setFeatures((prev) => [...prev, f]);
       if (gRef.current && mapRef.current) {
-        overlaysRef.current.set(f.id, drawFeature(gRef.current, mapRef.current, f));
+        addOverlay(f);
       }
     },
-    [projectId],
+    [projectId, addOverlay],
   );
 
   // ---- Parcel dimension labels + frontage edge markers -------------------
@@ -355,7 +406,7 @@ export default function Studio({
     setFrontageMode(false);
     const f = res.feature;
     setFeatures((prev) => [...prev, f]);
-    overlaysRef.current.set(f.id, drawFeature(g, map, f));
+    addOverlay(f);
     drawDimLabels(f.geojson);
     setParcel({
       id: f.id,
@@ -373,7 +424,7 @@ export default function Studio({
     for (const [lng, lat] of (f.geojson.coordinates as [number, number][][])[0]) bounds.extend({ lat, lng });
     map.fitBounds(bounds);
     setMsg(`Pulled ${res.meta?.town ?? "parcel"} lot — ${fmtSf(f.area_sf)}.${res.meta?.multipart ? " Multi-part lot — kept the largest piece." : ""}`);
-  }, [projectId, geocodeAddress, drawDimLabels, clearEdgeMarkers, removeOverlay]);
+  }, [projectId, geocodeAddress, drawDimLabels, clearEdgeMarkers, removeOverlay, addOverlay]);
 
   const applyEnvelope = useCallback(
     (feature: PlacedFeature) => {
@@ -385,10 +436,10 @@ export default function Studio({
         const next = prev.filter((f) => f.kind !== "envelope");
         return [...next, feature];
       });
-      overlaysRef.current.set(feature.id, drawFeature(g, map, feature));
+      addOverlay(feature);
       setHasEnvelope(true);
     },
-    [removeOverlay],
+    [removeOverlay, addOverlay],
   );
 
   const onPickFrontage = useCallback(
@@ -564,10 +615,10 @@ export default function Studio({
       }
       const f = res.feature;
       setFeatures((prev) => [...prev, f]);
-      overlaysRef.current.set(f.id, drawFeature(g, map, f));
+      addOverlay(f);
       setPlaceDesignId(""); // one drop, then exit place mode
     },
-    [projectId],
+    [projectId, addOverlay],
   );
 
   // A map click: place a point immediately, or add a polygon/line vertex.
@@ -645,7 +696,7 @@ export default function Studio({
         const bounds = new g.maps.LatLngBounds();
         let hasBounds = false;
         for (const f of initialFeatures) {
-          overlaysRef.current.set(f.id, drawFeature(g, map, f));
+          addOverlay(f);
           if (f.kind === "parcel") drawDimLabels(f.geojson);
           if (f.kind === "parcel" && f.geojson.type === "Polygon") {
             for (const [lng, lat] of (f.geojson.coordinates as [number, number][][])[0]) {
@@ -672,6 +723,18 @@ export default function Studio({
     if (frontageMode) placeEdgeMarkers();
     else clearEdgeMarkers();
   }, [frontageMode, placeEdgeMarkers, clearEdgeMarkers]);
+
+  // Placed items are draggable only when idle (not drawing/placing/tagging), so
+  // placement clicks otherwise pass through them.
+  useEffect(() => {
+    const idle = !activeTool && !placeDesignId && !frontageMode;
+    overlaysRef.current.forEach((ov, id) => {
+      const f = featuresRef.current.find((x) => x.id === id);
+      if (f && MOVEABLE.includes(f.kind)) {
+        (ov as unknown as { setOptions?: (o: object) => void }).setOptions?.({ clickable: idle, draggable: idle });
+      }
+    });
+  }, [activeTool, placeDesignId, frontageMode]);
 
   function pickTool(kind: FeatureKind) {
     clearDraft();
@@ -1047,6 +1110,9 @@ export default function Studio({
 
         <section className="rounded-lg border border-line bg-white p-4">
           <h3 className="font-display text-lg text-ink">Placed on site</h3>
+          {features.some((f) => MOVEABLE.includes(f.kind)) ? (
+            <p className="mt-1 text-xs text-muted/80">Tip: drag a house, well, or septic on the map to move it.</p>
+          ) : null}
           {features.length === 0 ? (
             <p className="mt-2 text-sm text-muted">Nothing placed yet.</p>
           ) : (

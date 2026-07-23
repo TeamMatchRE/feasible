@@ -173,6 +173,44 @@ export async function placeDesign(
   }
 }
 
+/**
+ * Persist a dragged feature's new geometry (well/septic/leach-field/house).
+ * Only the moveable site items — parcel/envelope/road aren't draggable.
+ */
+export async function moveFeature(
+  projectId: string,
+  kind: FeatureKind,
+  id: string,
+  geojson: GeoJSONGeometry,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await assertOwner(projectId);
+    switch (kind) {
+      case "house":
+        await sql`update feasible.template_placements set geom = ${toGeom(geojson)} where id = ${id} and project_id = ${projectId}`;
+        break;
+      case "well":
+        await sql`update feasible.wells set geom = ${toGeom(geojson)} where id = ${id} and project_id = ${projectId}`;
+        break;
+      case "septic":
+        await sql`update feasible.septic_systems set geom = ${toGeom(geojson)} where id = ${id} and project_id = ${projectId}`;
+        break;
+      case "leachfield":
+        await sql`
+          update feasible.leach_fields lf set geom = ${toGeom(geojson)}
+          from feasible.septic_systems s
+          where lf.id = ${id} and s.id = lf.septic_id and s.project_id = ${projectId}`;
+        break;
+      default:
+        return { ok: false, error: "That feature can't be moved." };
+    }
+    await touch(projectId);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Move failed." };
+  }
+}
+
 const KIND_TABLE: Record<FeatureKind, string> = {
   parcel: "feasible.parcels",
   house: "feasible.template_placements",
