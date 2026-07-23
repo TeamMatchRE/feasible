@@ -28,6 +28,9 @@ export default function Shell({
             <Link href="/designs" className="text-muted transition hover:text-ink">
               Designs
             </Link>
+            <Link href="/costs" className="text-muted transition hover:text-ink">
+              Costs
+            </Link>
           </nav>
           {crumb ? (
             <span className="truncate text-sm text-muted">{crumb}</span>

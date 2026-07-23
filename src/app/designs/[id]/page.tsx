@@ -3,7 +3,9 @@ import Link from "next/link";
 import Shell from "@/components/Shell";
 import { requireUser } from "@/lib/session";
 import { loadDesign } from "@/lib/queries";
+import { priceDesign } from "@/lib/costs";
 import { createClient } from "@/lib/supabase/server";
+import PricedTakeoff from "./PricedTakeoff";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,7 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
   const user = await requireUser();
   const design = await loadDesign(id, user.id);
   if (!design) notFound();
+  const priced = await priceDesign(id, user.id);
 
   // Signed URL for re-viewing the stored plan (private bucket, user's own file).
   let planUrl: string | null = null;
@@ -57,39 +60,7 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           </dl>
         </section>
 
-        <section className="rounded-lg border border-line bg-white p-4">
-          <h2 className="font-display text-lg text-ink">Takeoff</h2>
-          <p className="mt-1 text-xs italic text-muted/80">AI estimate from the plans — verify before relying on it.</p>
-          {design.takeoff.length === 0 ? (
-            <p className="mt-3 text-sm text-muted">No takeoff items.</p>
-          ) : (
-            <table className="mt-3 w-full text-sm">
-              <thead>
-                <tr className="border-b border-line text-left text-xs text-muted">
-                  <th className="py-1 pr-2">Category</th>
-                  <th className="py-1 pr-2">Description</th>
-                  <th className="py-1 pr-2 text-right">Quantity</th>
-                </tr>
-              </thead>
-              <tbody>
-                {design.takeoff.map((t, i) => {
-                  const isRoof = /roof/i.test(t.category);
-                  const qty =
-                    isRoof && t.unit === "SF"
-                      ? `${(t.quantity / 100).toFixed(1)} SQ (${Math.round(t.quantity).toLocaleString()} SF)`
-                      : `${Math.round(t.quantity).toLocaleString()} ${t.unit}`;
-                  return (
-                    <tr key={i} className="border-b border-line/50">
-                      <td className="py-1 pr-2 text-ink">{t.category}</td>
-                      <td className="py-1 pr-2 text-muted">{t.description ?? ""}</td>
-                      <td className="num py-1 pr-2 text-right text-ink">{qty}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </section>
+        <PricedTakeoff lines={priced} />
       </div>
     </Shell>
   );
