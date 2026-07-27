@@ -3,6 +3,7 @@ import Shell from "@/components/Shell";
 import NewStudy from "./NewStudy";
 import { deleteProject } from "./actions";
 import { requireUser } from "@/lib/session";
+import { greeting } from "@/lib/greeting";
 import { listProjects } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +32,8 @@ export default async function Home() {
     <Shell>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-3xl tracking-tight text-ink">
+          <p className="text-sm text-muted">{greeting(user.fullName)}</p>
+          <h1 className="mt-1 font-display text-3xl tracking-tight text-ink">
             Your studies
           </h1>
           <p className="mt-1 text-sm text-muted">
