@@ -4,9 +4,9 @@ import { safeNext } from "@/lib/safe-next";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; error?: string }>;
 }) {
-  const { next } = await searchParams;
+  const { next, error } = await searchParams;
   const dest = safeNext(next);
 
   return (
@@ -18,6 +18,12 @@ export default async function LoginPage({
         <p className="mt-3 text-sm text-muted">
           Can you build here — and what does the site work cost?
         </p>
+        {error === "domain" && (
+          <p className="mt-6 rounded-md border border-fail/30 bg-fail/5 px-4 py-3 text-sm text-ink">
+            That account isn&rsquo;t on the Brooke Group Workspace. Sign in with your
+            @brookegrouprealestate.com address.
+          </p>
+        )}
         <div className="mt-10">
           <SignIn next={dest} />
         </div>

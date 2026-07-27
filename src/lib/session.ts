@@ -2,6 +2,7 @@ import "server-only";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { sql } from "@/db";
+import { emailAllowed } from "@/lib/workspace";
 
 export interface SessionUser {
   id: string;
@@ -20,6 +21,10 @@ export async function getUser(): Promise<SessionUser | null> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return null;
+  // Gate BEFORE the profile upsert below — an outside account must never be
+  // mirrored into feasible.profiles, or it would leave a row behind after the
+  // session is refused.
+  if (!emailAllowed(user.email)) return null;
 
   const email = user.email ?? null;
   const fullName =
