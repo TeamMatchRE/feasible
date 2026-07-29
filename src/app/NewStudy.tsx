@@ -3,6 +3,7 @@
 import { useState, useRef } from "react";
 import { createProject } from "./actions";
 import { loadGoogleMaps } from "@/lib/google-maps";
+import { SubmitButton } from "@/components/SubmitButton";
 
 /**
  * New-study form. The address is geocoded in the browser (Maps JS Geocoder,
@@ -111,12 +112,11 @@ export default function NewStudy() {
       {err ? <p className="mt-3 text-xs text-fail">{err}</p> : null}
 
       <div className="mt-4 flex items-center gap-3">
-        <button
-          type="submit"
+        <SubmitButton pendingLabel="Creating…"
           className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-parchment transition hover:bg-ink-soft"
         >
           Create &amp; open studio
-        </button>
+        </SubmitButton>
         <button
           type="button"
           onClick={() => setOpen(false)}

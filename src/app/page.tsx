@@ -5,6 +5,7 @@ import { deleteProject } from "./actions";
 import { requireUser } from "@/lib/session";
 import { greeting } from "@/lib/greeting";
 import { listProjects } from "@/lib/queries";
+import { SubmitButton } from "@/components/SubmitButton";
 
 export const dynamic = "force-dynamic";
 
@@ -82,13 +83,12 @@ export default async function Home() {
                 </Link>
                 <form action={deleteProject} className="absolute right-3 top-3 opacity-0 transition group-hover:opacity-100">
                   <input type="hidden" name="id" value={p.id} />
-                  <button
-                    type="submit"
+                  <SubmitButton pendingLabel="Deleting…"
                     title="Delete study"
                     className="rounded px-1.5 py-0.5 text-xs text-muted hover:text-fail"
                   >
                     Delete
-                  </button>
+                  </SubmitButton>
                 </form>
               </li>
             ))}
