@@ -7,30 +7,32 @@
  * line from the inputs. So a mismatch here means one of the two models is wrong,
  * and the delta says by how much — which is the point.
  *
- * Run: npx tsx scripts/verify-multifamily.ts
+ * Run: npm test   (node:test — this is the repo's first real test file)
  */
-import { underwrite, type MultiFamilyInputs } from "../src/lib/multifamily";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { underwrite, type MultiFamilyInputs } from "./multifamily";
 
-let failures = 0;
 const money = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+const checks: (() => void)[] = [];
 
 /** Dollar comparison to the cent — these should reconcile exactly, not approximately. */
 const eq = (label: string, got: number, want: number, tol = 0.01) => {
   const delta = got - want;
   const ok = Math.abs(delta) <= tol;
-  if (!ok) failures++;
   console.log(
     `  ${ok ? "✓" : "✗"} ${label.padEnd(34)} ${money(got).padStart(16)}` +
       (ok ? "" : `   want ${money(want)}   Δ ${money(delta)}`),
   );
+  checks.push(() => assert.ok(ok, `${label}: got ${money(got)}, want ${money(want)} (Δ ${money(delta)})`));
 };
 const eqPct = (label: string, got: number, want: number, tol = 0.0001) => {
   const ok = Math.abs(got - want) <= tol;
-  if (!ok) failures++;
   console.log(
     `  ${ok ? "✓" : "✗"} ${label.padEnd(34)} ${(got * 100).toFixed(2).padStart(15)}%` +
       (ok ? "" : `   want ${(want * 100).toFixed(2)}%`),
   );
+  checks.push(() => assert.ok(ok, `${label}: got ${(got * 100).toFixed(2)}%, want ${(want * 100).toFixed(2)}%`));
 };
 
 // ---------------------------------------------------------------------------
@@ -151,8 +153,8 @@ console.log(`  Note                       ${r.exit.recommendation.note}`);
 // With no unit prices set, the sell-out exit must NOT masquerade as a real $0 answer.
 console.log("\n=== GUARD: unpriced sell-out can't look like a real answer ===");
 const guardOk = r.exit.sellOut.priced === false && r.exit.recommendation.best === "Build to Rent";
-if (!guardOk) failures++;
 console.log(`  ${guardOk ? "✓" : "✗"} unpriced sell-out flagged, BTR chosen by default`);
+checks.push(() => assert.ok(guardOk, "an unpriced sell-out must not present as a real $0 answer"));
 
 // Now price the units and confirm the comparison actually moves.
 console.log("\n=== SELL OUT vs BTR (units priced from for-sale comps) ===");
@@ -176,5 +178,6 @@ const sellGross = 44 * 425_000 + 75 * 585_000 + 11 * 720_000;
 eq("sell-out gross checks by hand", p.sellOut.grossProceeds, sellGross);
 eq("blend = half sell + half hold", p.blend.totalValue, p.sellOut.netProceeds * 0.5 + p.btr.netValue * 0.5, 1);
 
-console.log(failures === 0 ? "\nAll checks passed — the engine reproduces Procopio's model exactly." : `\n${failures} CHECK(S) FAILED.`);
-process.exit(failures === 0 ? 0 : 1);
+test("reconciles line-for-line with the Procopio workbook (26 W. Main St., Avon CT)", () => {
+  for (const c of checks) c();
+});
