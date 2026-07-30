@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { getUser } from "@/lib/session";
 import FeedbackWidget from "@/components/FeedbackWidget";
+import LilyPadLink from "@/components/LilyPadLink";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,6 +18,7 @@ export default async function RootLayout({
     <html lang="en">
       <body>
         {children}
+        {user && <LilyPadLink />}
         {user && (
           <FeedbackWidget
             app="feasible"
