@@ -16,6 +16,77 @@
  */
 
 // ---------------------------------------------------------------------------
+// Line detail — the escape hatch from a standardized estimate
+// ---------------------------------------------------------------------------
+
+/**
+ * Every line in this proforma is driven by a standardized rule: $/unit, $/SF, a
+ * share of EGI. That is the right default for a screen, and the wrong answer the
+ * moment you have a real number — an actual insurance indication, an assessor's
+ * mill rate, a signed management agreement.
+ *
+ * So any line can be opened and ITEMIZED. The sub-lines sum, and the sum REPLACES
+ * the estimate for that line. Clearing them falls back to the estimate. Nothing is
+ * silently substituted: `Proforma.lines` reports which mode each line is in, and
+ * both numbers, so a reader can always see what the estimate would have said.
+ */
+export type LineBasis = "amount" | "per_unit" | "per_sf" | "pct_egi";
+
+export type LineDetailItem = {
+  label: string;
+  basis: LineBasis;
+  /** Dollars, or dollars-per-unit / per-SF, or a rate like 0.03 for pct_egi. */
+  value: number;
+};
+
+export type LineDetail = {
+  mode: "estimate" | "itemized";
+  items: LineDetailItem[];
+  note?: string;
+};
+
+/** Keyed by the line's label EXACTLY as it appears in the proforma. */
+export type LineDetails = Record<string, LineDetail>;
+
+export type ProformaLine = {
+  label: string;
+  /** What the standardized rule produced, always computed even when overridden. */
+  estimated: number;
+  /** What the proforma actually uses. */
+  amount: number;
+  mode: "estimate" | "itemized";
+  items: LineDetailItem[];
+  note?: string;
+};
+
+/**
+ * Resolve one line. `egi` is only meaningful for expenses (income is computed
+ * before EGI exists), so income lines pass 0 and a pct_egi sub-line degrades to
+ * zero rather than reaching backwards through the model.
+ */
+function resolveLine(
+  label: string,
+  estimated: number,
+  details: LineDetails | undefined,
+  ctx: { units: number; sqft: number; egi: number },
+): ProformaLine {
+  const d = details?.[label];
+  if (!d || d.mode !== "itemized" || !d.items?.length) {
+    return { label, estimated, amount: estimated, mode: "estimate", items: d?.items ?? [], note: d?.note };
+  }
+  const amount = d.items.reduce((total, it) => {
+    const v = Number(it.value) || 0;
+    switch (it.basis) {
+      case "per_unit": return total + v * ctx.units;
+      case "per_sf": return total + v * ctx.sqft;
+      case "pct_egi": return total + v * ctx.egi;
+      default: return total + v;
+    }
+  }, 0);
+  return { label, estimated, amount, mode: "itemized", items: d.items, note: d.note };
+}
+
+// ---------------------------------------------------------------------------
 // Inputs
 // ---------------------------------------------------------------------------
 
@@ -83,6 +154,11 @@ export type MultiFamilyInputs = {
   ozPartnershipExpenses: number;
   /** Total development cost. Either a single number or the summed budget. */
   totalProjectCost: number;
+  /**
+   * Per-line overrides. Absent (the common case, and the case the Avon
+   * reconciliation runs) means every line uses its standardized estimate.
+   */
+  lineDetails?: LineDetails;
   exit: {
     /** Merchant-build / stabilized sale cap rate. */
     capRate: number;
@@ -132,6 +208,11 @@ export type Proforma = {
   /** Expenses */
   expenses: { label: string; amount: number }[];
   totalExpenses: number;
+  /**
+   * Every line, income and expense, with the estimate it would have used and
+   * whether an itemized detail replaced it. This is what the drill-down reads.
+   */
+  lines: ProformaLine[];
   /**
    * Total expenses ÷ TOTAL EGI. The defensible one: the numerator pays for the whole
    * building — taxes, insurance, payroll all cover the commercial space too — so the
@@ -250,25 +331,35 @@ export function buildProforma(i: MultiFamilyInputs): Proforma {
   const market = summarizeMix(i.marketUnits);
   const affordable = summarizeMix(i.affordableUnits);
   const units = market.totalUnits + affordable.totalUnits;
+  const netSqft = market.totalSqft + affordable.totalSqft;
   const oi = i.otherIncome;
+  const d = i.lineDetails;
 
-  const baseRentalIncome = market.annualRent + affordable.annualRent;
-  const parking = (oi.garageSpaces * oi.garageRentMonthly + oi.surfaceSpaces * oi.surfaceRentMonthly) * MONTHS;
-  const storage = oi.storageSpaces * oi.storageRentMonthly * MONTHS;
-  const petIncome = units * oi.petSharePct * oi.petRentMonthly * MONTHS;
-  const utilityBillback = units * oi.utilityBillbackPerUnitYear;
-  const grabAndGo = units * oi.grabAndGoPerUnitMonthly * MONTHS;
-  const wifi = units * oi.wifiPerUnitMonthly * MONTHS;
-  const miscIncome = units * oi.miscPerUnitYear;
+  // Income resolves BEFORE EGI exists, so pct_egi is not available here — see resolveLine.
+  const incomeCtx = { units, sqft: netSqft, egi: 0 };
+  const inc = (label: string, estimated: number) => resolveLine(label, estimated, d, incomeCtx);
 
-  const grossResidentialIncome =
-    baseRentalIncome + parking + storage + petIncome + utilityBillback + grabAndGo + wifi + miscIncome;
+  const incomeLines: ProformaLine[] = [
+    inc("Base Rental Income", market.annualRent + affordable.annualRent),
+    inc("Parking", (oi.garageSpaces * oi.garageRentMonthly + oi.surfaceSpaces * oi.surfaceRentMonthly) * MONTHS),
+    inc("Storage", oi.storageSpaces * oi.storageRentMonthly * MONTHS),
+    inc("Pet Income", units * oi.petSharePct * oi.petRentMonthly * MONTHS),
+    inc("Utility Billback", units * oi.utilityBillbackPerUnitYear),
+    inc("Grab & Go", units * oi.grabAndGoPerUnitMonthly * MONTHS),
+    inc("Wifi", units * oi.wifiPerUnitMonthly * MONTHS),
+    inc("Misc. Income", units * oi.miscPerUnitYear),
+  ];
+  const [baseRentalIncome, parking, storage, petIncome, utilityBillback, grabAndGo, wifi, miscIncome] =
+    incomeLines.map((l) => l.amount);
+
+  const grossResidentialIncome = sum(incomeLines.map((l) => l.amount));
   const residentialVacancy = -grossResidentialIncome * i.vacancy.residentialPct;
   const egiResidential = grossResidentialIncome + residentialVacancy;
 
   // Commercial is the one annual-quoted line, and it carries its own vacancy factor —
   // a retail bay goes dark differently than an apartment does.
-  const commercialIncome = oi.commercialSqft * oi.commercialRentPerSfYear;
+  const commercialLine = inc("Commercial Income", oi.commercialSqft * oi.commercialRentPerSfYear);
+  const commercialIncome = commercialLine.amount;
   const commercialVacancy = -commercialIncome * i.vacancy.commercialPct;
   const egiCommercial = commercialIncome + commercialVacancy;
 
@@ -278,19 +369,27 @@ export function buildProforma(i: MultiFamilyInputs): Proforma {
   const payroll = sum(o.payrollSalaries.map((p) => p.salary)) * (1 + o.payrollBurdenPct);
   const managementFee = egiResidential * o.managementFeePctOfResidentialEgi;
 
-  const expenses: { label: string; amount: number }[] = [
-    { label: "Utilities", amount: units * o.utilitiesPerUnit },
-    { label: "Payroll", amount: payroll },
-    { label: "Make Ready / Turnover", amount: units * o.makeReadyPerUnit },
-    { label: "General Marketing", amount: units * o.marketingPerUnit },
-    { label: "Repairs & Maintenance", amount: units * o.repairsPerUnit },
-    { label: "Contract Services", amount: units * o.contractServicesPerUnit },
-    { label: "General & Administrative", amount: units * o.generalAdminPerUnit },
-    { label: "Insurance", amount: units * o.insurancePerUnit },
-    { label: "Management Fee", amount: managementFee },
-    { label: "Taxes", amount: units * o.taxesPerUnit },
-    { label: "Reserves", amount: units * o.reservesPerUnit },
-  ];
+  // Expenses CAN reference EGI — it is fully resolved by this point.
+  const expenseCtx = { units, sqft: netSqft, egi: egiTotal };
+  const expenseLines: ProformaLine[] = (
+    [
+      ["Utilities", units * o.utilitiesPerUnit],
+      ["Payroll", payroll],
+      ["Make Ready / Turnover", units * o.makeReadyPerUnit],
+      ["General Marketing", units * o.marketingPerUnit],
+      ["Repairs & Maintenance", units * o.repairsPerUnit],
+      ["Contract Services", units * o.contractServicesPerUnit],
+      ["General & Administrative", units * o.generalAdminPerUnit],
+      ["Insurance", units * o.insurancePerUnit],
+      ["Management Fee", managementFee],
+      ["Taxes", units * o.taxesPerUnit],
+      ["Reserves", units * o.reservesPerUnit],
+    ] as [string, number][]
+  ).map(([label, estimated]) => resolveLine(label, estimated, d, expenseCtx));
+
+  // Kept as {label, amount} so every existing reader — including the Avon
+  // reconciliation — keeps working; the mode lives alongside on `lines`.
+  const expenses = expenseLines.map((l) => ({ label: l.label, amount: l.amount }));
   const totalExpenses = sum(expenses.map((e) => e.amount));
 
   const noi = egiTotal - totalExpenses;
@@ -302,6 +401,7 @@ export function buildProforma(i: MultiFamilyInputs): Proforma {
     grossResidentialIncome, residentialVacancy, egiResidential,
     commercialIncome, commercialVacancy, egiCommercial, egiTotal,
     expenses, totalExpenses,
+    lines: [...incomeLines, commercialLine, ...expenseLines],
     expenseRatio: safeDiv(totalExpenses, egiTotal),
     expenseRatioOnResidentialEgi: safeDiv(totalExpenses, egiResidential),
     noi, assetManagementFee, ozPartnershipExpenses: i.ozPartnershipExpenses, adjustedNoi,

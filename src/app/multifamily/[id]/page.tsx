@@ -32,6 +32,10 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
     totalProjectCost: Number(deal.total_project_cost ?? 0),
     notes: deal.notes ?? "",
     assumptions: { ...DEFAULT_ASSUMPTIONS, ...(deal.assumptions ?? {}) },
+    // Already merged over DEFAULT_COST_PROGRAM in loadMfDeal, including the
+    // fallback that keeps a pre-budget deal on its hand-typed total.
+    costProgram: deal.cost_program,
+    lineDetails: deal.line_details ?? {},
     units: units.map((u) => ({
       tier: u.tier,
       label: u.label,

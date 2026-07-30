@@ -1,6 +1,7 @@
 import "server-only";
 import { sql } from "@/db";
-import type { MultiFamilyInputs, UnitTypeInput } from "@/lib/multifamily";
+import type { MultiFamilyInputs, UnitTypeInput, LineDetails } from "@/lib/multifamily";
+import { DEFAULT_COST_PROGRAM, type CostProgram } from "@/lib/mf-costs";
 
 /**
  * Storage for multi-family deals. The engine's inputs are split three ways:
@@ -48,6 +49,8 @@ export type MfDeal = {
   storage_spaces: number | null;
   total_project_cost: number;
   assumptions: MfAssumptions;
+  cost_program: CostProgram;
+  line_details: LineDetails;
   notes: string | null;
   updated_at: string;
 };
@@ -149,8 +152,10 @@ export async function listMfDeals(ownerId: string): Promise<MfDealSummary[]> {
 
 export async function createMfDeal(ownerId: string, name: string, city: string | null): Promise<string> {
   const [row] = await sql<{ id: string }[]>`
-    insert into feasible.mf_deals (owner_id, name, city, assumptions)
-    values (${ownerId}, ${name}, ${city}, ${JSON.stringify(DEFAULT_ASSUMPTIONS)}::jsonb)
+    insert into feasible.mf_deals (owner_id, name, city, assumptions, cost_program)
+    values (${ownerId}, ${name}, ${city},
+            ${JSON.stringify(DEFAULT_ASSUMPTIONS)}::jsonb,
+            ${JSON.stringify(DEFAULT_COST_PROGRAM)}::jsonb)
     returning id`;
   // A deal with no mix can't be underwritten, so seed the shape the model expects.
   await sql`
@@ -169,7 +174,7 @@ export async function loadMfDeal(
   const [deal] = await sql<MfDeal[]>`
     select id, name, address, city, state, gross_sqft, commercial_sqft, height_stories,
            garage_spaces, surface_spaces, storage_spaces,
-           total_project_cost, assumptions, notes, updated_at
+           total_project_cost, assumptions, cost_program, line_details, notes, updated_at
     from feasible.mf_deals
     where id = ${id} and owner_id = ${ownerId}`;
   if (!deal) return null;
@@ -187,8 +192,30 @@ export async function loadMfDeal(
     where deal_id = ${id}
     order by kind, confirmed desc, created_at desc`;
 
+  // A deal saved before the cost program existed comes back as {} — merging over
+  // the defaults means it opens with a working budget instead of a page of zeros,
+  // and its underwrite is unchanged because useComputed only takes effect once
+  // there is something to compute.
+  const stored = asJson<Partial<CostProgram>>(deal.cost_program, {});
+  const cost_program: CostProgram = {
+    ...DEFAULT_COST_PROGRAM,
+    ...stored,
+    parking: { ...DEFAULT_COST_PROGRAM.parking, ...(stored.parking ?? {}) },
+  };
+  // An old deal has a hand-typed total and no budget. Keep using that number until
+  // the budget is actually built up, or the deal would silently reprice to ~$0.
+  if (!Object.keys(stored).length) {
+    cost_program.useComputed = false;
+    cost_program.overrideTotal = Number(deal.total_project_cost ?? 0);
+  }
+
   return {
-    deal: { ...deal, assumptions: asJson<MfAssumptions>(deal.assumptions, DEFAULT_ASSUMPTIONS) },
+    deal: {
+      ...deal,
+      assumptions: asJson<MfAssumptions>(deal.assumptions, DEFAULT_ASSUMPTIONS),
+      cost_program,
+      line_details: asJson<LineDetails>(deal.line_details, {}),
+    },
     units,
     comps: comps.map((c) => ({ ...c, detail: asJson<MfComp["detail"]>(c.detail, []) })),
   };

@@ -6,6 +6,9 @@ import { sql } from "@/db";
 import { requireUser } from "@/lib/session";
 import { loadMfDeal, type MfAssumptions } from "@/lib/mf-queries";
 import { findComps, type CompKind } from "@/lib/mf-comps-ai";
+import { refineParking, type ParkingRefinement } from "@/lib/mf-parking-ai";
+import type { LineDetails } from "@/lib/multifamily";
+import type { CostProgram } from "@/lib/mf-costs";
 
 const num = (v: FormDataEntryValue | null, fallback = 0): number => {
   if (v == null) return fallback;
@@ -53,6 +56,8 @@ export async function saveDeal(formData: FormData) {
   if (!(await ownDeal(user.id, dealId))) return;
 
   const assumptions = JSON.parse(String(formData.get("assumptions") ?? "{}")) as MfAssumptions;
+  const costProgram = JSON.parse(String(formData.get("cost_program") ?? "{}")) as CostProgram;
+  const lineDetails = JSON.parse(String(formData.get("line_details") ?? "{}")) as LineDetails;
   const units = JSON.parse(String(formData.get("units") ?? "[]")) as {
     id?: string;
     tier: "market" | "affordable";
@@ -77,6 +82,8 @@ export async function saveDeal(formData: FormData) {
       storage_spaces = ${num(formData.get("storage_spaces"))},
       total_project_cost = ${num(formData.get("total_project_cost"))},
       assumptions = ${JSON.stringify(assumptions)}::jsonb,
+      cost_program = ${JSON.stringify(costProgram)}::jsonb,
+      line_details = ${JSON.stringify(lineDetails)}::jsonb,
       notes = ${str(formData.get("notes"))},
       updated_at = now()
     where id = ${dealId} and owner_id = ${user.id}`;
@@ -97,6 +104,35 @@ export async function saveDeal(formData: FormData) {
   }
 
   revalidatePath(`/multifamily/${dealId}`);
+}
+
+export type RefineState = { refinement?: ParkingRefinement; error?: string } | null;
+
+/**
+ * Ask the model what this town requires for parking.
+ *
+ * Deliberately does NOT write. It hands the proposal back to the editor, which
+ * shows every figure next to the default it would displace and lets the
+ * underwriter apply them — the same propose→verify discipline the comp finder
+ * uses. A zoning table the model half-remembered should not resize a parking deck
+ * on its own.
+ */
+export async function refineParkingAction(_prev: RefineState, formData: FormData): Promise<RefineState> {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  const loaded = await loadMfDeal(user.id, dealId);
+  if (!loaded) return { error: "Deal not found." };
+
+  const { deal, units } = loaded;
+  const result = await refineParking({
+    address: deal.address,
+    city: deal.city,
+    state: deal.state ?? "CT",
+    unitTypes: units.map((u) => ({ label: u.label, count: Number(u.unit_count) })),
+    totalUnits: units.reduce((s, u) => s + Number(u.unit_count), 0),
+  });
+
+  return result.ok ? { refinement: result.refinement } : { error: result.error };
 }
 
 /**

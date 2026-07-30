@@ -1,10 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { underwrite, type MultiFamilyInputs, type UnitTypeInput } from "@/lib/multifamily";
+import {
+  underwrite,
+  type LineDetail,
+  type LineDetails,
+  type MultiFamilyInputs,
+  type ProformaLine,
+  type UnitTypeInput,
+} from "@/lib/multifamily";
+import { buildCost, type CostProgram } from "@/lib/mf-costs";
 import { saveDeal } from "../actions";
 import { SubmitButton } from "@/components/SubmitButton";
 import type { MfAssumptions } from "@/lib/mf-queries";
+import CostProgramPanel from "./CostProgram";
+import { LineDetailEditor, type LineContext } from "./LineDetail";
 
 /**
  * The deal editor. Everything recomputes as you type — the whole point of the
@@ -36,6 +46,8 @@ export type DealState = {
   totalProjectCost: number;
   notes: string;
   assumptions: MfAssumptions;
+  costProgram: CostProgram;
+  lineDetails: LineDetails;
   units: UnitRow[];
 };
 
@@ -67,6 +79,77 @@ function Field({
   );
 }
 
+/**
+ * One proforma row, with its detail editor as an inline drawer.
+ *
+ * MODULE SCOPE ON PURPOSE. Defined inside Underwriter's body this is a new
+ * component type on every render, so React unmounts and remounts the whole
+ * subtree each keystroke — the text input loses focus after one character and
+ * typing "84000" leaves you with "8". Keep it out here.
+ *
+ * A drawer rather than a modal so the rest of the proforma stays on screen and
+ * you can watch NOI move as you type.
+ */
+function ProformaRow({
+  line: l, detail, ctx, open, onToggle, onChange, negate = false, bold = false, allowPctEgi = true,
+}: {
+  line: ProformaLine;
+  detail: LineDetail | undefined;
+  ctx: LineContext;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (next: LineDetail | undefined) => void;
+  negate?: boolean;
+  bold?: boolean;
+  allowPctEgi?: boolean;
+}) {
+  const sign = negate ? -1 : 1;
+  return (
+    <>
+      <tr className={`border-b border-line/50 ${bold ? "font-medium" : ""}`}>
+        <td className="py-1">
+          <button
+            type="button"
+            onClick={onToggle}
+            className={`flex items-center gap-1.5 text-left ${bold ? "text-ink" : "text-muted"} hover:text-ink`}
+          >
+            <span className={`text-[10px] transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+            <span className="underline decoration-dotted underline-offset-2">{l.label}</span>
+            {l.mode === "itemized" && (
+              <span className="rounded-full bg-ink/10 px-1.5 py-0.5 text-[10px] font-medium text-ink">
+                detailed
+              </span>
+            )}
+          </button>
+        </td>
+        <td className={`py-1 text-right ${bold ? "" : "text-ink"}`}>
+          {money(sign * l.amount)}
+          {l.mode === "itemized" && l.amount !== l.estimated && (
+            <span className="ml-2 text-[11px] font-normal text-muted line-through">
+              {money(sign * l.estimated)}
+            </span>
+          )}
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={2} className="pb-3 pt-1">
+            <LineDetailEditor
+              line={l}
+              detail={detail}
+              ctx={ctx}
+              negate={negate}
+              allowPctEgi={allowPctEgi}
+              onChange={onChange}
+              onClose={onToggle}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
     <section className="rounded-lg border border-line bg-white p-4">
@@ -79,8 +162,19 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
 
 export default function Underwriter({ initial }: { initial: DealState }) {
   const [d, setD] = useState<DealState>(initial);
+  const [tab, setTab] = useState<"underwriting" | "costs">("underwriting");
+  const [openLine, setOpenLine] = useState<string | null>(null);
   const set = <K extends keyof DealState>(k: K, v: DealState[K]) => setD((p) => ({ ...p, [k]: v }));
   const setA = (patch: Partial<MfAssumptions>) => setD((p) => ({ ...p, assumptions: { ...p.assumptions, ...patch } }));
+
+  /** Undefined removes the key entirely, so a cleared line leaves no residue behind. */
+  const setLineDetail = (label: string, next: LineDetail | undefined) =>
+    setD((p) => {
+      const ld = { ...p.lineDetails };
+      if (next) ld[label] = next;
+      else delete ld[label];
+      return { ...p, lineDetails: ld };
+    });
 
   const setUnit = (i: number, patch: Partial<UnitRow>) =>
     setD((p) => ({ ...p, units: p.units.map((u, idx) => (idx === i ? { ...u, ...patch } : u)) }));
@@ -99,6 +193,22 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         sellPrice: u.sell_price ?? undefined,
       }));
 
+  /**
+   * The budget runs FIRST, because its total is the cost basis every exit is
+   * measured against. Both recompute on every keystroke, so raising the finish
+   * level or adding a parking deck moves the recommendation at the top of the page
+   * immediately — which is the whole reason to build it up rather than type it.
+   */
+  const build = useMemo(
+    () =>
+      buildCost({
+        program: d.costProgram,
+        mix: d.units.map((u) => ({ label: u.label, count: u.unit_count, sqft: u.sqft })),
+        commercialSqft: d.commercialSqft,
+      }),
+    [d.costProgram, d.units, d.commercialSqft],
+  );
+
   const result = useMemo(() => {
     const inputs: MultiFamilyInputs = {
       marketUnits: toInputs(d.units, "market"),
@@ -116,28 +226,46 @@ export default function Underwriter({ initial }: { initial: DealState }) {
       vacancy: d.assumptions.vacancy,
       assetManagementFeePct: d.assumptions.assetManagementFeePct,
       ozPartnershipExpenses: d.assumptions.ozPartnershipExpenses,
-      totalProjectCost: d.totalProjectCost,
+      totalProjectCost: build.effectiveTotal,
+      lineDetails: d.lineDetails,
       exit: d.assumptions.exit,
       sellOut: d.assumptions.sellOut,
     };
     return underwrite(inputs);
-  }, [d]);
+  }, [d, build.effectiveTotal]);
 
   const pf = result.proforma;
   const ex = result.exit;
   const oi = d.assumptions.otherIncome;
   const op = d.assumptions.opex;
 
-  const income: [string, number][] = [
-    ["Base Rental Income", pf.baseRentalIncome],
-    ["Parking", pf.parking],
-    ["Storage", pf.storage],
-    ["Pet Income", pf.petIncome],
-    ["Utility Billback", pf.utilityBillback],
-    ["Grab & Go", pf.grabAndGo],
-    ["Wifi", pf.wifi],
-    ["Misc. Income", pf.miscIncome],
+  const line = (label: string): ProformaLine =>
+    pf.lines.find((l) => l.label === label) ?? { label, estimated: 0, amount: 0, mode: "estimate", items: [] };
+
+  const lineCtx: LineContext = {
+    units: result.totalMix.totalUnits,
+    netSqft: result.totalMix.totalSqft,
+    egiTotal: pf.egiTotal,
+  };
+
+  const INCOME_LABELS = [
+    "Base Rental Income", "Parking", "Storage", "Pet Income",
+    "Utility Billback", "Grab & Go", "Wifi", "Misc. Income",
   ];
+
+  /** Bind the module-level row to this deal's state. */
+  const row = (label: string, opts: { negate?: boolean; allowPctEgi?: boolean } = {}) => (
+    <ProformaRow
+      key={label}
+      line={line(label)}
+      detail={d.lineDetails[label]}
+      ctx={lineCtx}
+      open={openLine === label}
+      onToggle={() => setOpenLine(openLine === label ? null : label)}
+      onChange={(next) => setLineDetail(label, next)}
+      {...opts}
+    />
+  );
 
   return (
     <div className="space-y-5">
@@ -200,6 +328,40 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         </div>
       </section>
 
+      {/* ---------- The answer stays above the tabs; the inputs split below ------- */}
+      <div className="flex gap-1 border-b border-line">
+        {([
+          ["underwriting", "Underwriting"],
+          ["costs", "Multi-family costs"],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+              tab === key ? "border-ink font-medium text-ink" : "border-transparent text-muted hover:text-ink"
+            }`}
+          >
+            {label}
+            {key === "costs" && (
+              <span className="ml-2 text-xs text-muted">{money(build.effectiveTotal)}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === "costs" && (
+        <CostProgramPanel
+          dealId={d.id}
+          program={d.costProgram}
+          build={build}
+          unitLabels={d.units.map((u) => ({ label: u.label, count: u.unit_count }))}
+          onChange={(next) => set("costProgram", next)}
+        />
+      )}
+
+      {tab === "underwriting" && (
+      <>
       <div className="grid gap-5 lg:grid-cols-2">
         {/* ---------- Property + cost ---------- */}
         <Section title="Property & cost basis" hint="One cost basis; all three exits are measured against it.">
@@ -216,8 +378,22 @@ export default function Underwriter({ initial }: { initial: DealState }) {
               <span className="block text-xs uppercase tracking-wide text-muted">City</span>
               <input className={`mt-1 ${inputCls}`} value={d.city} onChange={(e) => set("city", e.target.value)} />
             </label>
-            <Field label="Total project cost" value={d.totalProjectCost} onChange={(n) => set("totalProjectCost", n)} width="w-full" hint={`${money(result.costPerUnit)} / unit`} />
-            <Field label="Gross SF" value={d.grossSqft} onChange={(n) => set("grossSqft", n)} width="w-full" />
+            <div className="col-span-2 rounded border border-line bg-black/[0.02] p-2">
+              <p className="text-xs uppercase tracking-wide text-muted">Total project cost</p>
+              <p className="text-lg font-semibold text-ink">{money(build.effectiveTotal)}</p>
+              <p className="text-xs text-muted">
+                {money(result.costPerUnit)} / unit ·{" "}
+                {build.usingOverride ? "hand-entered override" : "built up from the budget"} —{" "}
+                <button
+                  type="button"
+                  onClick={() => setTab("costs")}
+                  className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                >
+                  edit in Costs
+                </button>
+              </p>
+            </div>
+            <Field label="Gross SF" value={d.grossSqft} onChange={(n) => set("grossSqft", n)} width="w-full" hint={`budget builds ${Math.round(build.buildingGrossSqft).toLocaleString()}`} />
             <Field label="Commercial SF" value={d.commercialSqft} onChange={(n) => set("commercialSqft", n)} width="w-full" />
             <Field label="Stories" value={d.heightStories} onChange={(n) => set("heightStories", n)} width="w-full" />
             <Field label="Garage spaces" value={d.garageSpaces} onChange={(n) => set("garageSpaces", n)} width="w-full" />
@@ -230,12 +406,8 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         <Section title="Stabilized proforma" hint="Income and expenses at stabilization, to NOI.">
           <table className="w-full text-sm">
             <tbody>
-              {income.map(([label, v]) => (
-                <tr key={label} className="border-b border-line/50">
-                  <td className="py-1 text-muted">{label}</td>
-                  <td className="py-1 text-right text-ink">{money(v)}</td>
-                </tr>
-              ))}
+              {/* Income resolves before EGI exists, so % of EGI isn't offered here. */}
+              {INCOME_LABELS.map((label) => row(label, { allowPctEgi: false }))}
               <tr className="border-b border-line font-medium">
                 <td className="py-1">Gross Income — Residential</td>
                 <td className="py-1 text-right">{money(pf.grossResidentialIncome)}</td>
@@ -244,20 +416,16 @@ export default function Underwriter({ initial }: { initial: DealState }) {
                 <td className="py-1 text-muted">Residential Vacancy</td>
                 <td className="py-1 text-right text-ink">{money(pf.residentialVacancy)}</td>
               </tr>
+              {row("Commercial Income", { allowPctEgi: false })}
               <tr className="border-b border-line/50">
-                <td className="py-1 text-muted">Commercial (less vacancy)</td>
-                <td className="py-1 text-right text-ink">{money(pf.egiCommercial)}</td>
+                <td className="py-1 text-muted">Commercial Vacancy</td>
+                <td className="py-1 text-right text-ink">{money(pf.commercialVacancy)}</td>
               </tr>
               <tr className="border-b border-line font-medium">
                 <td className="py-1">EGI — Total</td>
                 <td className="py-1 text-right">{money(pf.egiTotal)}</td>
               </tr>
-              {pf.expenses.map((e) => (
-                <tr key={e.label} className="border-b border-line/50">
-                  <td className="py-1 text-muted">{e.label}</td>
-                  <td className="py-1 text-right text-ink">{money(-e.amount)}</td>
-                </tr>
-              ))}
+              {pf.expenses.map((e) => row(e.label, { negate: true }))}
               <tr className="border-b border-line font-medium">
                 <td className="py-1">
                   Total Expenses
@@ -282,9 +450,11 @@ export default function Underwriter({ initial }: { initial: DealState }) {
             </tbody>
           </table>
           <p className="mt-2 text-[11px] text-muted">
-            Expense ratio on residential EGI only (the Procopio convention) is{" "}
-            {pct(pf.expenseRatioOnResidentialEgi)} — higher, because whole-building costs divide by
-            residential-only revenue. Reported for reconciliation; don&rsquo;t drive expenses off it.
+            Click any line to itemize it — the sub-lines replace the standardized estimate and the
+            estimate stays visible beside it. Expense ratio on residential EGI only (the Procopio
+            convention) is {pct(pf.expenseRatioOnResidentialEgi)} — higher, because whole-building costs
+            divide by residential-only revenue. Reported for reconciliation; don&rsquo;t drive expenses
+            off it.
           </p>
         </Section>
       </div>
@@ -440,6 +610,8 @@ export default function Underwriter({ initial }: { initial: DealState }) {
           </div>
         </Section>
       </div>
+      </>
+      )}
 
       {/* ---------- Save ---------- */}
       <form action={saveDeal} className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-white p-4">
@@ -454,9 +626,13 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         <input type="hidden" name="garage_spaces" value={d.garageSpaces} />
         <input type="hidden" name="surface_spaces" value={d.surfaceSpaces} />
         <input type="hidden" name="storage_spaces" value={d.storageSpaces} />
-        <input type="hidden" name="total_project_cost" value={d.totalProjectCost} />
+        {/* The column keeps the number the underwrite actually used, so the deals
+            list and any reader outside this editor see the same figure. */}
+        <input type="hidden" name="total_project_cost" value={build.effectiveTotal} />
         <input type="hidden" name="notes" value={d.notes} />
         <input type="hidden" name="assumptions" value={JSON.stringify(d.assumptions)} />
+        <input type="hidden" name="cost_program" value={JSON.stringify(d.costProgram)} />
+        <input type="hidden" name="line_details" value={JSON.stringify(d.lineDetails)} />
         <input type="hidden" name="units" value={JSON.stringify(d.units)} />
         <SubmitButton className="rounded bg-ink px-4 py-2 text-sm text-white hover:bg-ink/90">Save deal</SubmitButton>
         <span className="text-xs text-muted">
