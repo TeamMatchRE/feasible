@@ -4,6 +4,7 @@ import type { MultiFamilyInputs, UnitTypeInput, LineDetails } from "@/lib/multif
 import { DEFAULT_COST_PROGRAM, type CostProgram } from "@/lib/mf-costs";
 import { dealRole, canRead, type DealRole } from "@/lib/mf-access";
 import type { SessionUser } from "@/lib/session";
+import { ensureActiveScenario, loadScenario } from "@/lib/mf-scenarios";
 
 /**
  * Storage for multi-family deals. The engine's inputs are split three ways:
@@ -20,7 +21,7 @@ import type { SessionUser } from "@/lib/session";
  * postgres-js never applies its JSON parser. Everything reading a jsonb column
  * must go through this, or you end up spreading a string's characters.
  */
-function asJson<T>(v: unknown, fallback: T): T {
+export function asJson<T>(v: unknown, fallback: T): T {
   if (v == null) return fallback;
   if (typeof v === "string") {
     try {
@@ -160,8 +161,10 @@ export type MfDealSummary = {
 export async function listMfDeals(user: { id: string; email: string | null }): Promise<MfDealSummary[]> {
   const email = user.email?.trim().toLowerCase() ?? null;
   return sql<MfDealSummary[]>`
-    select d.id, d.name, d.city, d.total_project_cost, d.updated_at,
-           coalesce((select sum(u.unit_count) from feasible.mf_unit_types u where u.deal_id = d.id), 0)::int as units,
+    select d.id, d.name, d.city, d.updated_at,
+           coalesce(act.total_project_cost, 0) as total_project_cost,
+           coalesce((select sum(u.unit_count) from feasible.mf_unit_types u
+                      where u.scenario_id = d.active_scenario_id), 0)::int as units,
            case when d.owner_id = ${user.id} then null
                 else coalesce(p.full_name, p.email) end as shared_by,
            case when d.owner_id = ${user.id} then 'owner' else a.role end as role
@@ -171,56 +174,80 @@ export async function listMfDeals(user: { id: string; email: string | null }): P
      and ${email}::text is not null
      and lower(a.email) = ${email}
     left join feasible.profiles p on p.id = d.owner_id
+    left join feasible.mf_scenarios act on act.id = d.active_scenario_id
     where d.owner_id = ${user.id} or a.id is not null
     order by d.updated_at desc`;
 }
 
+/**
+ * Create a deal and the "Base case" scenario that holds its inputs.
+ *
+ * Since 0009 the mix hangs off a scenario, so a deal without one has nowhere to
+ * put its unit types — the scenario is created here rather than lazily, so the
+ * deal is openable the moment it exists.
+ */
 export async function createMfDeal(ownerId: string, name: string, city: string | null): Promise<string> {
   const [row] = await sql<{ id: string }[]>`
-    insert into feasible.mf_deals (owner_id, name, city, assumptions, cost_program)
-    values (${ownerId}, ${name}, ${city},
-            ${JSON.stringify(DEFAULT_ASSUMPTIONS)}::jsonb,
-            ${JSON.stringify(DEFAULT_COST_PROGRAM)}::jsonb)
+    insert into feasible.mf_deals (owner_id, name, city)
+    values (${ownerId}, ${name}, ${city})
     returning id`;
-  // A deal with no mix can't be underwritten, so seed the shape the model expects.
+
+  const [scenario] = await sql<{ id: string }[]>`
+    insert into feasible.mf_scenarios (deal_id, name, assumptions, cost_program, sort_order)
+    values (${row.id}, 'Base case',
+            ${JSON.stringify(DEFAULT_ASSUMPTIONS)}::jsonb,
+            ${JSON.stringify(DEFAULT_COST_PROGRAM)}::jsonb, 0)
+    returning id`;
+  await sql`update feasible.mf_deals set active_scenario_id = ${scenario.id} where id = ${row.id}`;
+
+  // A scenario with no mix can't be underwritten, so seed the shape the model expects.
   await sql`
-    insert into feasible.mf_unit_types (deal_id, tier, label, unit_count, rent_monthly, sqft, sort_order)
+    insert into feasible.mf_unit_types (scenario_id, tier, label, unit_count, rent_monthly, sqft, sort_order)
     values
-      (${row.id}, 'market', '1 Bed', 0, 0, 700, 1),
-      (${row.id}, 'market', '2 Bed', 0, 0, 1000, 2),
-      (${row.id}, 'market', '3 Bed', 0, 0, 1225, 3)`;
+      (${scenario.id}, 'market', '1 Bed', 0, 0, 700, 1),
+      (${scenario.id}, 'market', '2 Bed', 0, 0, 1000, 2),
+      (${scenario.id}, 'market', '3 Bed', 0, 0, 1225, 3)`;
   return row.id;
 }
 
 /**
- * Load a deal the caller is allowed to see.
+ * Load a deal the caller is allowed to see, at its ACTIVE SCENARIO.
  *
  * Access is resolved by `dealRole` (src/lib/mf-access.ts) rather than an
- * owner_id comparison here, because a deal can now be shared. The resolved role
+ * owner_id comparison here, because a deal can be shared. The resolved role
  * comes back with the deal so the page can render read-only for a viewer — and
  * so no caller has to ask a second time and risk asking differently.
+ *
+ * The underwriting inputs come from the active scenario, NOT from the mf_deals
+ * columns of the same name — those are legacy since 0009 and hold whatever the
+ * deal last had before scenarios existed. The deal row supplies identity only.
  */
 export async function loadMfDeal(
   user: SessionUser,
   id: string,
-): Promise<{ deal: MfDeal; units: MfUnitType[]; comps: MfComp[]; role: DealRole } | null> {
+): Promise<{
+  deal: MfDeal;
+  units: MfUnitType[];
+  comps: MfComp[];
+  role: DealRole;
+  scenarioId: string;
+  scenarioName: string;
+} | null> {
   const role = await dealRole(user, id);
   if (!canRead(role)) return null;
 
-  const [deal] = await sql<MfDeal[]>`
-    select id, name, address, city, state, gross_sqft, commercial_sqft, height_stories,
-           garage_spaces, surface_spaces, storage_spaces,
-           total_project_cost, assumptions, cost_program, line_details, notes, updated_at
+  const [row] = await sql<{ id: string; name: string; address: string | null; city: string | null;
+                           state: string | null; notes: string | null; updated_at: string }[]>`
+    select id, name, address, city, state, notes, updated_at
     from feasible.mf_deals
     where id = ${id}`;
-  if (!deal) return null;
+  if (!row) return null;
 
-  const units = await sql<MfUnitType[]>`
-    select id, tier, label, unit_count, rent_monthly, sqft, sell_price,
-           cost_per_sf, gross_factor, disposition, sort_order
-    from feasible.mf_unit_types
-    where deal_id = ${id}
-    order by tier, sort_order, label`;
+  const scenarioId = await ensureActiveScenario(id);
+  const scenario = await loadScenario(scenarioId);
+  if (!scenario) return null;
+
+  const units = scenario.units;
 
   const comps = await sql<MfComp[]>`
     select id, kind, property_name, address, city, year_built, units, distance_mi,
@@ -229,33 +256,27 @@ export async function loadMfDeal(
     where deal_id = ${id}
     order by kind, confirmed desc, created_at desc`;
 
-  // A deal saved before the cost program existed comes back as {} — merging over
-  // the defaults means it opens with a working budget instead of a page of zeros,
-  // and its underwrite is unchanged because useComputed only takes effect once
-  // there is something to compute.
-  const stored = asJson<Partial<CostProgram>>(deal.cost_program, {});
-  const cost_program: CostProgram = {
-    ...DEFAULT_COST_PROGRAM,
-    ...stored,
-    parking: { ...DEFAULT_COST_PROGRAM.parking, ...(stored.parking ?? {}) },
-  };
-  // An old deal has a hand-typed total and no budget. Keep using that number until
-  // the budget is actually built up, or the deal would silently reprice to ~$0.
-  if (!Object.keys(stored).length) {
-    cost_program.useComputed = false;
-    cost_program.overrideTotal = Number(deal.total_project_cost ?? 0);
-  }
-
+  // The scenario has already merged the cost-program defaults and applied the
+  // pre-budget fallback; see loadScenario.
   return {
     deal: {
-      ...deal,
-      assumptions: asJson<MfAssumptions>(deal.assumptions, DEFAULT_ASSUMPTIONS),
-      cost_program,
-      line_details: asJson<LineDetails>(deal.line_details, {}),
-    },
+      ...row,
+      gross_sqft: scenario.gross_sqft,
+      commercial_sqft: scenario.commercial_sqft,
+      height_stories: scenario.height_stories,
+      garage_spaces: scenario.garage_spaces,
+      surface_spaces: scenario.surface_spaces,
+      storage_spaces: scenario.storage_spaces,
+      total_project_cost: scenario.total_project_cost,
+      assumptions: scenario.assumptions,
+      cost_program: scenario.cost_program,
+      line_details: scenario.line_details,
+    } as MfDeal,
     units,
     comps: comps.map((c) => ({ ...c, detail: asJson<MfComp["detail"]>(c.detail, []) })),
     role: role as DealRole,
+    scenarioId,
+    scenarioName: scenario.name,
   };
 }
 

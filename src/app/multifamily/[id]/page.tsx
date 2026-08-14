@@ -7,6 +7,8 @@ import Underwriter from "./Underwriter";
 import CompsPanel from "./CompsPanel";
 import SharePanel from "./SharePanel";
 import { canWrite, canManage, listCollaborators, dealOwner } from "@/lib/mf-access";
+import ScenarioBar from "./ScenarioBar";
+import { listScenarios } from "@/lib/mf-scenarios";
 
 export const dynamic = "force-dynamic";
 
@@ -15,12 +17,13 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
   const user = await requireUser();
   const loaded = await loadMfDeal(user, id);
   if (!loaded) notFound();
-  const { deal, units, comps, role } = loaded;
+  const { deal, units, comps, role, scenarioId } = loaded;
 
   // Only the owner manages sharing, so only the owner pays for these queries.
   const collaborators = canManage(role) ? await listCollaborators(id) : [];
   const owner = role === "owner" ? null : await dealOwner(id);
   const editable = canWrite(role);
+  const scenarios = await listScenarios(id);
 
   // postgres-js returns numerics as strings; normalize once here so the client
   // component never has to wonder which fields are numbers.
@@ -79,7 +82,16 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
         {canManage(role) && <SharePanel dealId={deal.id} collaborators={collaborators} />}
       </div>
 
-      <Underwriter initial={initial} canEdit={editable} />
+      <ScenarioBar
+        dealId={deal.id}
+        scenarios={scenarios}
+        activeId={scenarioId}
+        canEdit={editable}
+      />
+
+      {/* key forces a fresh editor when the scenario changes — otherwise React
+          keeps the old useState(initial) and shows the previous case's numbers. */}
+      <Underwriter key={scenarioId} initial={initial} canEdit={editable} />
 
       <CompsPanel dealId={deal.id} comps={comps} canEdit={editable} />
     </Shell>

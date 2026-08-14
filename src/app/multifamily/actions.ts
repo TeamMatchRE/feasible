@@ -13,6 +13,13 @@ import {
   grantAccess,
   revokeAccess,
 } from "@/lib/mf-access";
+import {
+  ensureActiveScenario,
+  duplicateScenario,
+  renameScenario,
+  setActiveScenario,
+  deleteScenario,
+} from "@/lib/mf-scenarios";
 import { findComps, type CompKind } from "@/lib/mf-comps-ai";
 import { refineParking, type ParkingRefinement } from "@/lib/mf-parking-ai";
 import type { LineDetails } from "@/lib/multifamily";
@@ -90,12 +97,23 @@ export async function saveDeal(formData: FormData) {
     disposition: "sell" | "hold" | null;
   }[];
 
+  // The deal row keeps identity only. Everything you can underwrite with belongs
+  // to the active scenario, so a save lands there — leaving every OTHER scenario
+  // on this deal untouched, which is the whole point of having them.
+  const scenarioId = await ensureActiveScenario(dealId);
+
   await sql`
     update feasible.mf_deals set
       name = ${str(formData.get("name")) ?? "Untitled deal"},
       address = ${str(formData.get("address"))},
       city = ${str(formData.get("city"))},
       state = ${str(formData.get("state")) ?? "CT"},
+      notes = ${str(formData.get("notes"))},
+      updated_at = now()
+    where id = ${dealId}`;
+
+  await sql`
+    update feasible.mf_scenarios set
       gross_sqft = ${num(formData.get("gross_sqft"))},
       commercial_sqft = ${num(formData.get("commercial_sqft"))},
       height_stories = ${num(formData.get("height_stories"))},
@@ -106,22 +124,21 @@ export async function saveDeal(formData: FormData) {
       assumptions = ${JSON.stringify(assumptions)}::jsonb,
       cost_program = ${JSON.stringify(costProgram)}::jsonb,
       line_details = ${JSON.stringify(lineDetails)}::jsonb,
-      notes = ${str(formData.get("notes"))},
       updated_at = now()
-    where id = ${dealId}`;
+    where id = ${scenarioId} and deal_id = ${dealId}`;
 
   // Replace the mix wholesale. Comp quantities don't hang off unit types, so
   // there's nothing to cascade — this is safe and keeps deletes trivial.
-  await sql`delete from feasible.mf_unit_types where deal_id = ${dealId}`;
+  await sql`delete from feasible.mf_unit_types where scenario_id = ${scenarioId}`;
   let order = 0;
   for (const u of units) {
     if (!u.label?.trim()) continue;
     order += 1;
     await sql`
       insert into feasible.mf_unit_types
-        (deal_id, tier, label, unit_count, rent_monthly, sqft, sell_price,
+        (scenario_id, tier, label, unit_count, rent_monthly, sqft, sell_price,
          cost_per_sf, gross_factor, disposition, sort_order)
-      values (${dealId}, ${u.tier === "affordable" ? "affordable" : "market"}, ${u.label.trim()},
+      values (${scenarioId}, ${u.tier === "affordable" ? "affordable" : "market"}, ${u.label.trim()},
               ${Math.max(0, Math.round(u.unit_count || 0))}, ${u.rent_monthly || 0}, ${u.sqft || 0},
               ${nullableNum(u.sell_price)},
               ${nullableNum(u.cost_per_sf)}, ${nullableNum(u.gross_factor)},
@@ -248,16 +265,22 @@ export async function applyCompToMix(formData: FormData) {
   }
   if (!Array.isArray(detail)) return;
 
+  // Comps belong to the DEAL, but a mix belongs to a scenario — so applying one
+  // writes into the scenario you currently have open and leaves the others alone.
+  // That is deliberate: pulling market rents onto your base case should not
+  // silently overwrite the downside case you built to test lower ones.
+  const scenarioId = await ensureActiveScenario(dealId);
+
   const norm = (s: string) => s.trim().toLowerCase();
   for (const line of detail) {
     const value = comp.kind === "rent" ? line.rent : line.price;
     if (value == null) continue; // a null means "not found" — never write it as 0
     if (comp.kind === "rent") {
       await sql`update feasible.mf_unit_types set rent_monthly = ${value}
-                where deal_id = ${dealId} and tier = 'market' and lower(trim(label)) = ${norm(line.label)}`;
+                where scenario_id = ${scenarioId} and tier = 'market' and lower(trim(label)) = ${norm(line.label)}`;
     } else {
       await sql`update feasible.mf_unit_types set sell_price = ${value}
-                where deal_id = ${dealId} and tier = 'market' and lower(trim(label)) = ${norm(line.label)}`;
+                where scenario_id = ${scenarioId} and tier = 'market' and lower(trim(label)) = ${norm(line.label)}`;
     }
   }
   revalidatePath(`/multifamily/${dealId}`);
@@ -308,5 +331,58 @@ export async function unshareDeal(formData: FormData) {
   const accessId = String(formData.get("accessId"));
   await requireDealOwner(user, dealId);
   await revokeAccess(dealId, accessId);
+  revalidatePath(`/multifamily/${dealId}`);
+}
+
+
+// ---------------------------------------------------------------------------
+// SCENARIOS — the cases being compared on one deal.
+//
+// All of these are writes to the deal's underwriting, so they need editor
+// access, not ownership: a colleague you invited to underwrite with you should
+// be able to build a case. Deleting the deal itself remains owner-only.
+// ---------------------------------------------------------------------------
+
+export async function newScenario(formData: FormData) {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  if (!(await canEditDeal(user, dealId))) return;
+
+  const from = String(formData.get("from") || "") || (await ensureActiveScenario(dealId));
+  const name = str(formData.get("name")) ?? "New scenario";
+
+  // Forking the scenario you are looking at, rather than starting blank: a case
+  // is defined by the two things it changes, not by forty numbers re-entered.
+  const id = await duplicateScenario(dealId, from, name);
+  await setActiveScenario(dealId, id);
+  revalidatePath(`/multifamily/${dealId}`);
+}
+
+export async function switchScenario(formData: FormData) {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  if (!(await canEditDeal(user, dealId))) return;
+  await setActiveScenario(dealId, String(formData.get("scenarioId")));
+  revalidatePath(`/multifamily/${dealId}`);
+}
+
+export async function updateScenario(formData: FormData) {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  if (!(await canEditDeal(user, dealId))) return;
+  await renameScenario(
+    dealId,
+    String(formData.get("scenarioId")),
+    str(formData.get("name")) ?? "Untitled scenario",
+    str(formData.get("note")),
+  );
+  revalidatePath(`/multifamily/${dealId}`);
+}
+
+export async function removeScenario(formData: FormData) {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  if (!(await canEditDeal(user, dealId))) return;
+  await deleteScenario(dealId, String(formData.get("scenarioId")));
   revalidatePath(`/multifamily/${dealId}`);
 }
