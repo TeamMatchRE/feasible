@@ -59,17 +59,89 @@ export type CommonArea = {
   sqft: number;
   /** null = follow the finish level's rate for this placement. */
   costPerSf: number | null;
+  /**
+   * A LUMP SUM amenity — a pool, a pickleball court, an entry gate. When set,
+   * this line costs exactly this and `sqft`/`costPerSf` are ignored; it also adds
+   * no enclosed building area, because a tennis court has no roof.
+   *
+   * Undefined (the common case, and every deal saved before amenities existed)
+   * means the line is a building priced per SF, exactly as before.
+   */
+  lumpCost?: number | null;
 };
 
-/** A sensible starting program — every line editable, most start at 0 SF. */
-export const DEFAULT_COMMON_AREAS: CommonArea[] = [
-  { id: "lobby", name: "Lobby & leasing", placement: "attached", sqft: 0, costPerSf: null },
-  { id: "fitness", name: "Fitness center", placement: "attached", sqft: 0, costPerSf: null },
-  { id: "club", name: "Club / community room", placement: "attached", sqft: 0, costPerSf: null },
-  { id: "mail", name: "Mail & package room", placement: "attached", sqft: 0, costPerSf: null },
-  { id: "pool", name: "Pool & deck", placement: "detached", sqft: 0, costPerSf: null },
-  { id: "maint", name: "Maintenance building", placement: "detached", sqft: 0, costPerSf: null },
+/**
+ * A new deal starts with NO amenity program.
+ *
+ * The old default seeded six zero-SF rows, which read as a checklist somebody
+ * forgot to fill in. An amenity program is a decision — you add what this
+ * community is actually getting, from the catalog below, and re-cost it.
+ */
+export const DEFAULT_COMMON_AREAS: CommonArea[] = [];
+
+/**
+ * The amenity catalog behind the "Add amenity" picker.
+ *
+ * Every figure is an ILLUSTRATIVE 2026 New England starting point meant to be
+ * overwritten — the same posture as FINISH_RATES. The sizes matter as much as
+ * the rates: a clubhouse at 8,000 SF is what a 200-unit community actually
+ * builds, and having that on screen is the cheapest possible guard against a
+ * number entered in the wrong order of magnitude.
+ *
+ * `lump` and `sqft` are mutually exclusive: a preset is either a building priced
+ * per SF or a site amenity priced whole.
+ */
+export type AmenityPreset = {
+  id: string;
+  name: string;
+  group: string;
+  placement: CommonPlacement;
+  /** Per-SF building preset. */
+  sqft?: number;
+  costPerSf?: number | null;
+  /** Lump-sum site preset. */
+  lump?: number;
+  note?: string;
+};
+
+export const AMENITY_PRESETS: AmenityPreset[] = [
+  // --- Buildings, priced per SF ---------------------------------------------
+  { id: "clubhouse", name: "Clubhouse", group: "Community buildings", placement: "detached", sqft: 8_000, costPerSf: 280, note: "~35 SF/unit is typical for 200–250 units" },
+  { id: "leasing", name: "Leasing & sales center", group: "Community buildings", placement: "attached", sqft: 2_500, costPerSf: null },
+  { id: "fitness", name: "Fitness center", group: "Community buildings", placement: "attached", sqft: 2_500, costPerSf: null },
+  { id: "coworking", name: "Co-working lounge", group: "Community buildings", placement: "attached", sqft: 1_800, costPerSf: null },
+  { id: "poolhouse", name: "Pool house / cabana", group: "Community buildings", placement: "detached", sqft: 1_200, costPerSf: null },
+  { id: "mail", name: "Mail & package room", group: "Community buildings", placement: "attached", sqft: 600, costPerSf: null },
+  { id: "maint", name: "Maintenance building", group: "Community buildings", placement: "detached", sqft: 2_000, costPerSf: null },
+
+  // --- Recreation, priced whole ---------------------------------------------
+  { id: "pool", name: "Pool & deck", group: "Recreation", placement: "detached", lump: 850_000 },
+  { id: "pickleball", name: "Pickleball courts (2)", group: "Recreation", placement: "detached", lump: 180_000 },
+  { id: "tennis", name: "Tennis court", group: "Recreation", placement: "detached", lump: 160_000 },
+  { id: "basketball", name: "Basketball court", group: "Recreation", placement: "detached", lump: 95_000 },
+  { id: "totlot", name: "Playground / tot lot", group: "Recreation", placement: "detached", lump: 120_000 },
+  { id: "dogpark", name: "Dog park", group: "Recreation", placement: "detached", lump: 65_000 },
+
+  // --- Grounds & entry, priced whole ----------------------------------------
+  { id: "trails", name: "Walking trails", group: "Grounds & entry", placement: "detached", lump: 270_000 },
+  { id: "pavilion", name: "Picnic pavilion & grills", group: "Grounds & entry", placement: "detached", lump: 85_000 },
+  { id: "firepit", name: "Fire pit & gathering lawn", group: "Grounds & entry", placement: "detached", lump: 55_000 },
+  { id: "garden", name: "Community garden", group: "Grounds & entry", placement: "detached", lump: 40_000 },
+  { id: "gate", name: "Gated entry (2 stations)", group: "Grounds & entry", placement: "detached", lump: 350_000 },
+  { id: "monument", name: "Entry monument & signage", group: "Grounds & entry", placement: "detached", lump: 120_000 },
 ];
+
+/** Build a fresh line from a preset. `id` is uniquified by the caller. */
+export function amenityFromPreset(p: AmenityPreset, id: string): CommonArea {
+  return {
+    id,
+    name: p.name,
+    placement: p.placement,
+    sqft: p.sqft ?? 0,
+    costPerSf: p.costPerSf ?? null,
+    lumpCost: p.lump ?? null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Parking
@@ -360,10 +432,25 @@ export type BudgetLine = {
   amount: number;
 };
 
+/** What one product type contributed to the residential hard cost. */
+export type ResidentialTypeCost = {
+  label: string;
+  units: number;
+  netSqft: number;
+  grossSqft: number;
+  efficiency: number;
+  costPerSf: number;
+  amount: number;
+  overridden: boolean;
+};
+
 export type CostBuildResult = {
   /** SF the contractor actually builds, by piece. */
   residentialNetSqft: number;
   residentialGrossSqft: number;
+  /** Residential hard cost split by product type — always populated, even when
+   * the budget renders as one blended line. */
+  residentialByType: ResidentialTypeCost[];
   attachedCommonSqft: number;
   detachedCommonSqft: number;
   commercialSqft: number;
@@ -393,10 +480,34 @@ export type CostBuildResult = {
   costPerGrossSqft: number;
 };
 
+/**
+ * One product type in the cost build.
+ *
+ * `costPerSf` and `grossFactor` are the escape hatch from a single-building
+ * assumption. A deal that builds detached houses, attached townhomes and stacked
+ * flats has three unit costs and three different amounts of shared circulation to
+ * pay for; a deal that builds one apartment building leaves both null and gets
+ * the program's rate and efficiency, exactly as before.
+ */
+export type CostMixRow = {
+  label: string;
+  count: number;
+  sqft: number;
+  /** null = follow the program's residentialCostPerSf / finish level. */
+  costPerSf?: number | null;
+  /**
+   * Net-to-gross divisor for THIS product. null = follow the program's
+   * circulationEfficiency. Use 1 for a detached house or a townhome, where the
+   * quoted $/SF already covers the whole building and there is no corridor,
+   * elevator or shared lobby to gross up for.
+   */
+  grossFactor?: number | null;
+};
+
 export type CostBuildInput = {
   program: CostProgram;
   /** The full mix, both tiers. */
-  mix: { label: string; count: number; sqft: number }[];
+  mix: CostMixRow[];
   commercialSqft: number;
 };
 
@@ -405,33 +516,86 @@ export function buildCost(input: CostBuildInput): CostBuildResult {
   const rates = FINISH_RATES[p.finishLevel];
 
   const totalUnits = sum(input.mix.map((u) => u.count));
-  const residentialNetSqft = sum(input.mix.map((u) => u.count * u.sqft));
-  // Efficiency of 0 would divide by zero; treat it as "no grossing" rather than NaN.
-  const residentialGrossSqft =
-    p.circulationEfficiency > 0 ? residentialNetSqft / p.circulationEfficiency : residentialNetSqft;
 
-  const attached = p.commonAreas.filter((c) => c.placement === "attached");
-  const detached = p.commonAreas.filter((c) => c.placement === "detached");
+  const resRateDefault = p.residentialCostPerSf ?? rates.residential;
+
+  /**
+   * Price each product type on its own terms, then decide how to present it.
+   *
+   * A type with no overrides resolves to the program's rate and efficiency, so a
+   * one-building deal lands on precisely the arithmetic this function did before
+   * per-type costing existed.
+   */
+  const byType = input.mix.map((u) => {
+    const netSqft = u.count * u.sqft;
+    const eff = u.grossFactor ?? p.circulationEfficiency;
+    // A zero divisor would produce NaN; treat it as "no grossing", same as the
+    // program-level rule.
+    const grossSqft = eff > 0 ? netSqft / eff : netSqft;
+    const rate = u.costPerSf ?? resRateDefault;
+    return {
+      label: u.label,
+      units: u.count,
+      netSqft,
+      grossSqft,
+      efficiency: eff,
+      costPerSf: rate,
+      amount: grossSqft * rate,
+      /** True when this row broke from the program on rate or on grossing. */
+      overridden: u.costPerSf != null || u.grossFactor != null,
+    };
+  });
+
+  const residentialNetSqft = sum(byType.map((t) => t.netSqft));
+  const residentialGrossSqft = sum(byType.map((t) => t.grossSqft));
+
+  // A lump-sum amenity (pool, dog park, entry gate) costs money but encloses no
+  // building area, so it is kept out of the SF rollups that feed grossing and
+  // the building-area reads.
+  const isLump = (c: CommonArea) => c.lumpCost != null;
+  const lumpAmenities = p.commonAreas.filter(isLump);
+  const attached = p.commonAreas.filter((c) => !isLump(c) && c.placement === "attached");
+  const detached = p.commonAreas.filter((c) => !isLump(c) && c.placement === "detached");
   const attachedCommonSqft = sum(attached.map((c) => c.sqft));
   const detachedCommonSqft = sum(detached.map((c) => c.sqft));
 
   const parking = sizeParking(p.parking, input.mix);
 
-  const resRate = p.residentialCostPerSf ?? rates.residential;
   const shellRate = p.commercialShellCostPerSf ?? rates.commercialShell;
   const tiRate = p.commercialTiCostPerSf ?? rates.commercialTi;
 
   const sf = (n: number) => Math.round(n).toLocaleString("en-US");
   const rate = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 
-  const hardLines: BudgetLine[] = [
-    {
-      key: "residential",
-      label: "Residential units",
-      detail: `${sf(residentialNetSqft)} net SF ÷ ${(p.circulationEfficiency * 100).toFixed(0)}% = ${sf(residentialGrossSqft)} gross × ${rate(resRate)}`,
-      amount: residentialGrossSqft * resRate,
-    },
-  ];
+  /**
+   * One line when every type follows the program — the familiar single
+   * "Residential units" row. One line PER type as soon as any type breaks from
+   * it, because at that point a blended row would hide the very distinction the
+   * override was made to draw.
+   */
+  const anyOverridden = byType.some((t) => t.overridden);
+  const describe = (netSqft: number, eff: number, grossSqft: number, r: number) =>
+    eff === 1
+      ? `${sf(netSqft)} SF × ${rate(r)}`
+      : `${sf(netSqft)} net SF ÷ ${(eff * 100).toFixed(0)}% = ${sf(grossSqft)} gross × ${rate(r)}`;
+
+  const hardLines: BudgetLine[] = anyOverridden
+    ? byType
+        .filter((t) => t.netSqft > 0)
+        .map((t) => ({
+          key: `residential_${t.label.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+          label: `${t.label} — ${t.units.toLocaleString()} units`,
+          detail: describe(t.netSqft, t.efficiency, t.grossSqft, t.costPerSf),
+          amount: t.amount,
+        }))
+    : [
+        {
+          key: "residential",
+          label: "Residential units",
+          detail: describe(residentialNetSqft, p.circulationEfficiency, residentialGrossSqft, resRateDefault),
+          amount: residentialGrossSqft * resRateDefault,
+        },
+      ];
 
   if (input.commercialSqft > 0) {
     hardLines.push({
@@ -466,6 +630,16 @@ export function buildCost(input: CostBuildInput): CostBuildResult {
       label: `${c.name} — detached`,
       detail: `${sf(c.sqft)} SF × ${rate(r)}`,
       amount: c.sqft * r,
+    });
+  }
+  for (const c of lumpAmenities) {
+    const amount = c.lumpCost ?? 0;
+    if (amount === 0) continue;
+    hardLines.push({
+      key: `common_${c.id}`,
+      label: c.name,
+      detail: "Lump sum",
+      amount,
     });
   }
 
@@ -524,6 +698,7 @@ export function buildCost(input: CostBuildInput): CostBuildResult {
   return {
     residentialNetSqft,
     residentialGrossSqft,
+    residentialByType: byType,
     attachedCommonSqft,
     detachedCommonSqft,
     commercialSqft: input.commercialSqft,

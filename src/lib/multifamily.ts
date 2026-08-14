@@ -90,6 +90,25 @@ function resolveLine(
 // Inputs
 // ---------------------------------------------------------------------------
 
+/**
+ * What happens to a unit type at the end of the job.
+ *
+ * Undefined on every type is the ORIGINAL behaviour: the deal is one pool of
+ * units and `sellOut.shareSold` prorates it — sell 40% of the deal means sell 40%
+ * of every type. That is the right model for a condo building deciding how much
+ * of one product to sell.
+ *
+ * It is the wrong model for a deal that builds several products and knows which
+ * ones it is selling. "Sell the houses and the townhomes, hold the apartments"
+ * is not 45% of everything, and prorating it charges the held asset with houses
+ * it doesn't own and credits the sell-out with apartments it never sold.
+ *
+ * So a type may DESIGNATE itself. The moment any type does, the deal switches to
+ * designated mode: the sell-out is the 'sell' types, the held asset is the
+ * 'hold' types, and `shareSold` is ignored because the program already said.
+ */
+export type Disposition = "sell" | "hold";
+
 /** One line of the unit mix. Market-rate and affordable tiers use the same shape. */
 export type UnitTypeInput = {
   /** "1 Bed", "2 Bed", "Studio", "3 Bed"… free text so an odd mix isn't forced into a taxonomy. */
@@ -101,7 +120,22 @@ export type UnitTypeInput = {
   sqft: number;
   /** For-sale price per unit, when this type is sold rather than held. */
   sellPrice?: number;
+  /** Undefined = follow `sellOut.shareSold`. See Disposition. */
+  disposition?: Disposition;
 };
+
+/**
+ * True when the mix designates dispositions per type rather than leaving the
+ * split to `shareSold`. One designated type is enough to switch modes — a mix
+ * that half-declares is a mistake worth surfacing, and the undeclared types
+ * fall to 'hold' (below) where they are at least visible in the held asset.
+ */
+export function isDesignated(units: UnitTypeInput[]): boolean {
+  return units.some((u) => u.disposition != null);
+}
+
+/** In designated mode an undeclared type is held — the conservative reading. */
+const dispositionOf = (u: UnitTypeInput): Disposition => u.disposition ?? "hold";
 
 export type OtherIncomeInput = {
   /** Commercial is quoted ANNUAL $/SF (the one annual figure in the model). */
@@ -328,8 +362,22 @@ export function summarizeMix(units: UnitTypeInput[]): UnitMixSummary {
 }
 
 export function buildProforma(i: MultiFamilyInputs): Proforma {
-  const market = summarizeMix(i.marketUnits);
-  const affordable = summarizeMix(i.affordableUnits);
+  const all = [...i.marketUnits, ...i.affordableUnits];
+
+  /**
+   * The stabilized proforma describes the asset you OWN once the job is done.
+   *
+   * In designated mode that is the held types only — a house you sold pays you
+   * no rent, and it also sends you no tax bill, no insurance premium and no
+   * turnover cost. Sizing per-unit opex off all 225 units when 105 of them were
+   * sold to homeowners is the expensive half of the same mistake.
+   *
+   * With no designation the whole mix is the asset, exactly as before.
+   */
+  const designated = isDesignated(all);
+  const heldFilter = (u: UnitTypeInput) => !designated || dispositionOf(u) === "hold";
+  const market = summarizeMix(i.marketUnits.filter(heldFilter));
+  const affordable = summarizeMix(i.affordableUnits.filter(heldFilter));
   const units = market.totalUnits + affordable.totalUnits;
   const netSqft = market.totalSqft + affordable.totalSqft;
   const oi = i.otherIncome;
@@ -419,6 +467,12 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   const cost = i.totalProjectCost;
   const totalUnits = sum(allUnits.map((u) => u.count));
 
+  // In designated mode the plan is not one of three candidate exits — the program
+  // already chose, and the job of this function is to price THAT, not to shop.
+  const designated = isDesignated(allUnits);
+  const soldTypes = designated ? allUnits.filter((u) => dispositionOf(u) === "sell") : allUnits;
+  const heldTypes = designated ? allUnits.filter((u) => dispositionOf(u) === "hold") : allUnits;
+
   // --- Build to rent -------------------------------------------------------
   const grossValue = safeDiv(pf.noi, i.exit.capRate);
   const btrSaleCosts = grossValue * i.exit.saleCostPct;
@@ -440,8 +494,8 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   // --- Sell out ------------------------------------------------------------
   // A unit with no sale price contributes nothing; if NOTHING is priced we say so
   // rather than reporting a confident $0.
-  const priced = allUnits.some((u) => (u.sellPrice ?? 0) > 0);
-  const grossProceeds = sum(allUnits.map((u) => u.count * (u.sellPrice ?? 0)));
+  const priced = soldTypes.some((u) => (u.sellPrice ?? 0) > 0);
+  const grossProceeds = sum(soldTypes.map((u) => u.count * (u.sellPrice ?? 0)));
   const sellCosts = grossProceeds * i.sellOut.saleCostPct;
   const netProceeds = grossProceeds - sellCosts;
   const sellOut = {
@@ -458,12 +512,19 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   // Sell a share of the units, hold the rest. The held portion keeps its share of NOI
   // and is capitalized; the sold portion returns cash at the unit prices. Cost is NOT
   // split — the whole project has to be paid for either way.
-  const share = Math.min(Math.max(i.sellOut.shareSold, 0), 1);
-  const unitsSold = totalUnits * share;
-  const heldNoi = pf.noi * (1 - share);
+  // In designated mode the shares are FACTS from the mix, not a dial: the sell
+  // types are sold whole and the held types are held whole. `pf.noi` is already
+  // the held-only NOI (see buildProforma), so it is capitalized as-is rather
+  // than scaled by a share that no longer means anything.
+  const soldUnitCount = sum(soldTypes.map((u) => u.count));
+  const share = designated
+    ? safeDiv(soldUnitCount, totalUnits)
+    : Math.min(Math.max(i.sellOut.shareSold, 0), 1);
+  const unitsSold = designated ? soldUnitCount : totalUnits * share;
+  const heldNoi = designated ? pf.noi : pf.noi * (1 - share);
   const heldGross = safeDiv(heldNoi, i.exit.capRate);
   const heldNet = heldGross - heldGross * i.exit.saleCostPct;
-  const blendSellNet = netProceeds * share;
+  const blendSellNet = designated ? netProceeds : netProceeds * share;
   const blendTotal = blendSellNet + heldNet;
   const blend = {
     shareSold: share,
@@ -478,6 +539,28 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   };
 
   // --- Which one -----------------------------------------------------------
+  // Designated mode has nothing to choose. The mix says which units are sold and
+  // which are held, so the blend IS the plan; reporting "Build to Rent wins"
+  // against a program that sells 105 houses would be answering a question nobody
+  // asked. The other two stay populated as hypotheticals for the reader.
+  if (designated) {
+    const heldUnitCount = sum(heldTypes.map((u) => u.count));
+    return {
+      btr,
+      sellOut,
+      blend,
+      recommendation: {
+        best: "Blend",
+        profit: blend.profit,
+        overRunnerUp: 0,
+        note:
+          `Program is designated: ${soldUnitCount} units sold, ${heldUnitCount} held. ` +
+          `The blend is the plan, not the winner of a comparison — profit is ` +
+          `sell-out proceeds plus the capitalized value of the held units.`,
+      },
+    };
+  }
+
   const options: { best: ExitAnalysis["recommendation"]["best"]; profit: number }[] = [
     { best: "Build to Rent", profit: btr.profit },
     ...(priced ? [{ best: "Sell Out" as const, profit: sellOut.profit }] : []),

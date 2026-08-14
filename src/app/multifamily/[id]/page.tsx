@@ -43,6 +43,11 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
       rent_monthly: Number(u.rent_monthly),
       sqft: Number(u.sqft),
       sell_price: u.sell_price != null ? Number(u.sell_price) : null,
+      // NULL means "follow the cost program" — preserve it rather than
+      // collapsing it to 0, which would build the product for free.
+      cost_per_sf: u.cost_per_sf != null ? Number(u.cost_per_sf) : null,
+      gross_factor: u.gross_factor != null ? Number(u.gross_factor) : null,
+      disposition: u.disposition ?? null,
     })),
   };
 

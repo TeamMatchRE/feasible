@@ -16,12 +16,15 @@ import {
   suggestRoadLf,
   DEFAULT_COST_PROGRAM,
   FINISH_RATES,
+  AMENITY_PRESETS,
+  amenityFromPreset,
   type CostProgram,
 } from "./mf-costs";
 import { underwrite, type MultiFamilyInputs, type LineDetails } from "./multifamily";
 
 const near = (got: number, want: number, tol = 0.01) =>
   assert.ok(Math.abs(got - want) <= tol, `got ${got}, want ${want} (Δ ${got - want})`);
+const sumOf = (ns: number[]) => ns.reduce((a, b) => a + b, 0);
 
 // A mix with a bit of everything, so the ratio rules all get exercised.
 const MIX = [
@@ -179,6 +182,172 @@ test("the override replaces the computed total without erasing it", () => {
   near(c.costPerUnit, 45_000_000 / 130, 0.01);
 });
 
+// ---------------------------------------------------------------------------
+// Per-unit-type cost basis — three products, three rates, three grossings
+// ---------------------------------------------------------------------------
+
+test("a mix with no per-type overrides costs exactly what it did before per-type costing", () => {
+  // The backward-compatibility guarantee stated in db/migrations/0007. Asserted,
+  // not assumed: every stored deal must reprice to the same dollar.
+  const program: CostProgram = { ...DEFAULT_COST_PROGRAM, finishLevel: "Upgraded", circulationEfficiency: 0.85 };
+  const c = buildCost({ program, mix: MIX, commercialSqft: 0 });
+
+  // One blended line, the familiar label.
+  const residential = c.hardLines.filter((l) => l.key.startsWith("residential"));
+  assert.equal(residential.length, 1);
+  assert.equal(residential[0].label, "Residential units");
+  // 110,440 ÷ 0.85 × $285
+  near(residential[0].amount, (110_440 / 0.85) * FINISH_RATES.Upgraded.residential, 0.5);
+  near(c.residentialGrossSqft, 110_440 / 0.85);
+  // The per-type breakdown is still populated, and still sums to the same total.
+  near(sumOf(c.residentialByType.map((t) => t.amount)), residential[0].amount, 0.5);
+  assert.ok(c.residentialByType.every((t) => !t.overridden));
+});
+
+test("each product type is priced at its own rate and its own grossing", () => {
+  const program: CostProgram = {
+    ...DEFAULT_COST_PROGRAM,
+    circulationEfficiency: 0.85, // applies only to the type that doesn't override it
+    softCostPct: 0,
+    contingencyPct: 0,
+    developerFeePct: 0,
+    infrastructure: [],
+    commonAreas: [],
+    parking: { ...DEFAULT_COST_PROGRAM.parking, components: [] },
+  };
+  const c = buildCost({
+    program,
+    mix: [
+      // Detached: quoted $/SF is the whole house, so no grossing at all.
+      { label: "Single family", count: 50, sqft: 2_200, costPerSf: 205, grossFactor: 1 },
+      // Attached townhome: own entry, still no interior corridor.
+      { label: "Townhome", count: 55, sqft: 1_700, costPerSf: 190, grossFactor: 1 },
+      // Stacked flats: corridors and elevators, so the program's 0.85 stands.
+      { label: "2 Bed flat", count: 120, sqft: 1_050, costPerSf: 190 },
+    ],
+    commercialSqft: 0,
+  });
+
+  const sfHomes = 50 * 2_200 * 205; // 110,000 SF × $205 = $22,550,000
+  const towns = 55 * 1_700 * 190; //  93,500 SF × $190 = $17,765,000
+  const flats = ((120 * 1_050) / 0.85) * 190; // 126,000 ÷ 0.85 × $190 = $28,164,705.88
+
+  near(sfHomes, 22_550_000);
+  near(towns, 17_765_000);
+  near(c.hardCost, sfHomes + towns + flats, 0.5);
+
+  // One line per product, because a blended row would hide the distinction.
+  assert.equal(c.hardLines.length, 3);
+  assert.equal(c.hardLines[0].label, "Single family — 50 units");
+  assert.equal(c.hardLines[0].detail, "110,000 SF × $205");
+  assert.equal(c.hardLines[2].detail, "126,000 net SF ÷ 85% = 148,235 gross × $190");
+
+  // Only the flats get grossed up; the houses and townhomes do not.
+  near(c.residentialNetSqft, 110_000 + 93_500 + 126_000);
+  near(c.residentialGrossSqft, 110_000 + 93_500 + 126_000 / 0.85);
+});
+
+test("grossing a detached house would invent 17.6% of hard cost", () => {
+  // The specific error the per-type basis exists to prevent, stated as a number.
+  const program: CostProgram = {
+    ...DEFAULT_COST_PROGRAM,
+    circulationEfficiency: 0.85,
+    residentialCostPerSf: 205,
+    softCostPct: 0, contingencyPct: 0, developerFeePct: 0,
+    infrastructure: [], commonAreas: [],
+    parking: { ...DEFAULT_COST_PROGRAM.parking, components: [] },
+  };
+  const mix = [{ label: "Single family", count: 50, sqft: 2_200 }];
+
+  const grossed = buildCost({ program, mix, commercialSqft: 0 });
+  const honest = buildCost({ program, mix: [{ ...mix[0], grossFactor: 1 }], commercialSqft: 0 });
+
+  near(honest.hardCost, 110_000 * 205, 0.5); // $22,550,000
+  near(grossed.hardCost, (110_000 / 0.85) * 205, 0.5); // $26,529,411.76
+  // 1/0.85 − 1 = 17.647%
+  near((grossed.hardCost - honest.hardCost) / honest.hardCost, 0.17647, 0.0001);
+});
+
+test("a per-type rate of 0 is honoured, but a missing one falls back to the program", () => {
+  const program: CostProgram = {
+    ...DEFAULT_COST_PROGRAM,
+    residentialCostPerSf: 300,
+    circulationEfficiency: 1,
+    softCostPct: 0, contingencyPct: 0, developerFeePct: 0,
+    infrastructure: [], commonAreas: [],
+    parking: { ...DEFAULT_COST_PROGRAM.parking, components: [] },
+  };
+  const c = buildCost({
+    program,
+    mix: [
+      { label: "Donated", count: 10, sqft: 1_000, costPerSf: 0 }, // explicit 0 ≠ "unset"
+      { label: "Normal", count: 10, sqft: 1_000 },
+    ],
+    commercialSqft: 0,
+  });
+  near(c.residentialByType[0].amount, 0);
+  near(c.residentialByType[1].amount, 10_000 * 300);
+  near(c.hardCost, 3_000_000, 0.5);
+});
+
+test("a lump-sum amenity costs its lump and encloses no building area", () => {
+  const program: CostProgram = {
+    ...DEFAULT_COST_PROGRAM,
+    softCostPct: 0, contingencyPct: 0, developerFeePct: 0,
+    infrastructure: [],
+    parking: { ...DEFAULT_COST_PROGRAM.parking, components: [] },
+    commonAreas: [
+      { id: "club", name: "Clubhouse", placement: "detached", sqft: 8_000, costPerSf: 280 },
+      // A pool has no roof: it costs $850k and adds zero SF to the building.
+      { id: "pool", name: "Pool & deck", placement: "detached", sqft: 0, costPerSf: null, lumpCost: 850_000 },
+      { id: "gate", name: "Gated entry", placement: "detached", sqft: 0, costPerSf: null, lumpCost: 350_000 },
+    ],
+  };
+  const c = buildCost({ program, mix: MIX, commercialSqft: 0 });
+
+  // 8,000 × $280 clubhouse + the two lumps, on top of the residential.
+  const residential = (110_440 / 0.85) * FINISH_RATES.Upgraded.residential;
+  near(c.hardCost, residential + 8_000 * 280 + 850_000 + 350_000, 0.5);
+
+  // Only the clubhouse is enclosed area; the lumps must not inflate it.
+  near(c.detachedCommonSqft, 8_000);
+  near(c.buildingGrossSqft, 110_440 / 0.85);
+
+  const labels = c.hardLines.map((l) => l.label);
+  assert.ok(labels.includes("Pool & deck"));
+  assert.equal(c.hardLines.find((l) => l.label === "Pool & deck")!.detail, "Lump sum");
+});
+
+test("an amenity preset lands as an editable line, and a zero lump is dropped", () => {
+  const club = AMENITY_PRESETS.find((a) => a.id === "clubhouse")!;
+  const line = amenityFromPreset(club, "x1");
+  // The catalog's clubhouse is a defensible 8,000 SF, not a five-figure guess.
+  assert.equal(line.sqft, 8_000);
+  assert.equal(line.costPerSf, 280);
+  assert.equal(line.lumpCost, null); // per-SF preset, so no lump
+
+  const pool = amenityFromPreset(AMENITY_PRESETS.find((a) => a.id === "pool")!, "x2");
+  assert.equal(pool.lumpCost, 850_000);
+  assert.equal(pool.sqft, 0);
+
+  // A lump of 0 is "not costed yet" and shouldn't print a $0 budget line.
+  const c = buildCost({
+    program: {
+      ...DEFAULT_COST_PROGRAM,
+      infrastructure: [],
+      parking: { ...DEFAULT_COST_PROGRAM.parking, components: [] },
+      commonAreas: [{ id: "z", name: "Dog park", placement: "detached", sqft: 0, costPerSf: null, lumpCost: 0 }],
+    },
+    mix: MIX,
+    commercialSqft: 0,
+  });
+  assert.ok(!c.hardLines.some((l) => l.label === "Dog park"));
+});
+
+test("a new deal starts with no amenity program at all", () => {
+  assert.equal(DEFAULT_COST_PROGRAM.commonAreas.length, 0);
+});
+
 test("a zero efficiency degrades to no grossing instead of NaN", () => {
   const c = buildCost({
     program: { ...DEFAULT_COST_PROGRAM, circulationEfficiency: 0 },
@@ -277,6 +446,84 @@ test("an itemized income line flows through vacancy to EGI", () => {
   near(r.proforma.baseRentalIncome, 2_500_000);
   near(r.proforma.grossResidentialIncome, 2_500_000);
   near(r.proforma.egiTotal, 2_375_000); // less 5%
+});
+
+// ---------------------------------------------------------------------------
+// Designated disposition — "sell the houses, hold the apartments"
+// ---------------------------------------------------------------------------
+
+/** 10 houses built to sell, 100 flats built to hold. Opex is $1,000/unit flat. */
+const designatedBase: MultiFamilyInputs = {
+  ...base,
+  marketUnits: [
+    { label: "House", count: 10, rentMonthly: 0, sqft: 2_000, sellPrice: 500_000, disposition: "sell" },
+    { label: "1 Bed", count: 100, rentMonthly: 2_000, sqft: 700, disposition: "hold" },
+  ],
+  opex: { ...base.opex, insurancePerUnit: 1_000 },
+  totalProjectCost: 30_000_000,
+  sellOut: { saleCostPct: 0.05, shareSold: 0.5 }, // deliberately set, and must be IGNORED
+};
+
+test("designated mode charges opex only against the units actually held", () => {
+  const r = underwrite(designatedBase);
+  // 100 held units × $1,000 — NOT 110. The 10 sold houses send no tax or
+  // insurance bill to an owner who no longer owns them.
+  near(r.proforma.expenses.find((e) => e.label === "Insurance")!.amount, 100_000);
+  // Income is the held units' rent only.
+  near(r.proforma.egiTotal, 100 * 2_000 * 12);
+  near(r.proforma.noi, 2_400_000 - 100_000);
+});
+
+test("designated mode sells the sell types whole and holds the hold types whole", () => {
+  const r = underwrite(designatedBase);
+  const e = r.exit;
+
+  // 10 houses × $500,000 — the flats are not in the sell-out at any share.
+  near(e.sellOut.grossProceeds, 5_000_000);
+  near(e.sellOut.netProceeds, 5_000_000 * 0.95);
+
+  // shareSold of 0.5 is ignored; the mix already said 10 of 110.
+  near(e.blend.shareSold, 10 / 110, 0.0001);
+  assert.equal(e.blend.unitsSold, 10);
+  assert.equal(e.blend.unitsHeld, 100);
+
+  // Held NOI is the full held-only NOI, not prorated again.
+  near(e.blend.heldNoi, 2_300_000);
+  near(e.blend.heldNetValue, 2_300_000 / 0.055);
+  near(e.blend.totalValue, 4_750_000 + 2_300_000 / 0.055);
+  near(e.blend.profit, 4_750_000 + 2_300_000 / 0.055 - 30_000_000);
+});
+
+test("designated mode reports the plan rather than picking a winner", () => {
+  const r = underwrite(designatedBase);
+  assert.equal(r.exit.recommendation.best, "Blend");
+  assert.equal(r.exit.recommendation.overRunnerUp, 0);
+  assert.match(r.exit.recommendation.note, /10 units sold, 100 held/);
+  near(r.exit.recommendation.profit, r.exit.blend.profit);
+});
+
+test("an undeclared type in a designated mix is held, not silently sold", () => {
+  const r = underwrite({
+    ...designatedBase,
+    marketUnits: [
+      { label: "House", count: 10, rentMonthly: 0, sqft: 2_000, sellPrice: 500_000, disposition: "sell" },
+      // No disposition, and it HAS a sell price — the conservative read is hold.
+      { label: "1 Bed", count: 100, rentMonthly: 2_000, sqft: 700, sellPrice: 300_000 },
+    ],
+  });
+  near(r.exit.sellOut.grossProceeds, 5_000_000);
+  assert.equal(r.exit.blend.unitsHeld, 100);
+});
+
+test("with no disposition anywhere, the proration model is untouched", () => {
+  // The guarantee that every stored deal keeps its number.
+  const prorated = underwrite({ ...base, sellOut: { saleCostPct: 0.05, shareSold: 0.5 } });
+  near(prorated.exit.blend.shareSold, 0.5);
+  near(prorated.exit.blend.unitsSold, 50);
+  // Half the NOI is capitalized, exactly as before.
+  near(prorated.exit.blend.heldNoi, prorated.proforma.noi * 0.5);
+  // 100 units × $900 insurance — the whole mix, since nothing was designated.
+  near(prorated.proforma.expenses.find((e) => e.label === "Insurance")!.amount, 90_000);
 });
 
 test("an empty or estimate-mode detail falls back to the estimate", () => {

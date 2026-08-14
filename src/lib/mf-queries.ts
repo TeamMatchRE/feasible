@@ -63,6 +63,12 @@ export type MfUnitType = {
   rent_monthly: number;
   sqft: number;
   sell_price: number | null;
+  /** Hard cost $/SF for this product. null = follow the cost program's rate. */
+  cost_per_sf: number | null;
+  /** Net-to-gross divisor. null = follow the program; 1 = no grossing. */
+  gross_factor: number | null;
+  /** 'sell' | 'hold'. null everywhere = prorate by shareSold. */
+  disposition: "sell" | "hold" | null;
   sort_order: number;
 };
 
@@ -180,7 +186,8 @@ export async function loadMfDeal(
   if (!deal) return null;
 
   const units = await sql<MfUnitType[]>`
-    select id, tier, label, unit_count, rent_monthly, sqft, sell_price, sort_order
+    select id, tier, label, unit_count, rent_monthly, sqft, sell_price,
+           cost_per_sf, gross_factor, disposition, sort_order
     from feasible.mf_unit_types
     where deal_id = ${id}
     order by tier, sort_order, label`;
@@ -231,4 +238,5 @@ export const toUnitInputs = (rows: MfUnitType[], tier: "market" | "affordable"):
       rentMonthly: Number(u.rent_monthly),
       sqft: Number(u.sqft),
       sellPrice: u.sell_price != null ? Number(u.sell_price) : undefined,
+      disposition: u.disposition ?? undefined,
     }));

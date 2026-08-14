@@ -29,6 +29,22 @@ type UnitRow = {
   rent_monthly: number;
   sqft: number;
   sell_price: number | null;
+  /**
+   * Per-product cost basis. Both null on a normal single-building deal, where
+   * the cost program's one residential rate and one circulation efficiency are
+   * the right answer. Set them when the deal builds more than one product —
+   * detached houses, townhomes and stacked flats cost different amounts per SF
+   * and only the flats have corridors to gross up for.
+   */
+  cost_per_sf: number | null;
+  gross_factor: number | null;
+  /**
+   * 'sell' or 'hold' for this product. null on EVERY row keeps the deal on the
+   * old model, where sellOut.shareSold prorates the whole mix. Setting it on any
+   * row switches the deal to designated mode — see Disposition in
+   * @/lib/multifamily.
+   */
+  disposition: "sell" | "hold" | null;
 };
 
 export type DealState = {
@@ -179,7 +195,10 @@ export default function Underwriter({ initial }: { initial: DealState }) {
   const setUnit = (i: number, patch: Partial<UnitRow>) =>
     setD((p) => ({ ...p, units: p.units.map((u, idx) => (idx === i ? { ...u, ...patch } : u)) }));
   const addUnit = (tier: "market" | "affordable") =>
-    setD((p) => ({ ...p, units: [...p.units, { tier, label: "New type", unit_count: 0, rent_monthly: 0, sqft: 0, sell_price: null }] }));
+    setD((p) => ({
+      ...p,
+      units: [...p.units, { tier, label: "New type", unit_count: 0, rent_monthly: 0, sqft: 0, sell_price: null, cost_per_sf: null, gross_factor: null, disposition: null }],
+    }));
   const removeUnit = (i: number) => setD((p) => ({ ...p, units: p.units.filter((_, idx) => idx !== i) }));
 
   const toInputs = (rows: UnitRow[], tier: "market" | "affordable"): UnitTypeInput[] =>
@@ -191,6 +210,7 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         rentMonthly: u.rent_monthly,
         sqft: u.sqft,
         sellPrice: u.sell_price ?? undefined,
+        disposition: u.disposition ?? undefined,
       }));
 
   /**
@@ -203,7 +223,13 @@ export default function Underwriter({ initial }: { initial: DealState }) {
     () =>
       buildCost({
         program: d.costProgram,
-        mix: d.units.map((u) => ({ label: u.label, count: u.unit_count, sqft: u.sqft })),
+        mix: d.units.map((u) => ({
+          label: u.label,
+          count: u.unit_count,
+          sqft: u.sqft,
+          costPerSf: u.cost_per_sf,
+          grossFactor: u.gross_factor,
+        })),
         commercialSqft: d.commercialSqft,
       }),
     [d.costProgram, d.units, d.commercialSqft],
@@ -460,9 +486,12 @@ export default function Underwriter({ initial }: { initial: DealState }) {
       </div>
 
       {/* ---------- Unit mix ---------- */}
-      <Section title="Unit mix" hint="Market-rate and affordable tiers price the same bedroom count differently, so they're separate rows.">
+      <Section
+        title="Unit mix"
+        hint="Market-rate and affordable tiers price the same bedroom count differently, so they're separate rows. Leave Cost $/SF and Gross blank to follow the cost program; set them per row when the deal builds more than one product type."
+      >
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[1020px] text-sm">
             <thead className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
               <tr>
                 <th className="py-1 font-medium">Tier</th>
@@ -471,7 +500,10 @@ export default function Underwriter({ initial }: { initial: DealState }) {
                 <th className="py-1 text-right font-medium">Rent /mo</th>
                 <th className="py-1 text-right font-medium">SF</th>
                 <th className="py-1 text-right font-medium">$/SF</th>
+                <th className="py-1 text-right font-medium" title="Hard cost per SF for this product. Blank = follow the cost program.">Cost $/SF</th>
+                <th className="py-1 text-right font-medium" title="Net-to-gross divisor. Blank = follow the program's circulation efficiency. 1 = no grossing (detached house, townhome).">Gross</th>
                 <th className="py-1 text-right font-medium">Sale price</th>
+                <th className="py-1 font-medium" title="Sell this product or hold it. Leave on Prorate everywhere to split the whole deal by the sell-out share instead.">Exit</th>
                 <th className="py-1" />
               </tr>
             </thead>
@@ -505,10 +537,39 @@ export default function Underwriter({ initial }: { initial: DealState }) {
                     <input
                       className={cellCls}
                       inputMode="numeric"
+                      placeholder="prog."
+                      value={u.cost_per_sf == null ? "" : String(u.cost_per_sf)}
+                      onChange={(e) => setUnit(i, { cost_per_sf: e.target.value.trim() === "" ? null : numOr(e.target.value) })}
+                    />
+                  </td>
+                  <td className="py-1 text-right">
+                    <input
+                      className={cellCls}
+                      inputMode="decimal"
+                      placeholder="prog."
+                      value={u.gross_factor == null ? "" : String(u.gross_factor)}
+                      onChange={(e) => setUnit(i, { gross_factor: e.target.value.trim() === "" ? null : numOr(e.target.value) })}
+                    />
+                  </td>
+                  <td className="py-1 text-right">
+                    <input
+                      className={cellCls}
+                      inputMode="numeric"
                       placeholder="—"
                       value={u.sell_price == null ? "" : String(u.sell_price)}
                       onChange={(e) => setUnit(i, { sell_price: e.target.value.trim() === "" ? null : numOr(e.target.value) })}
                     />
+                  </td>
+                  <td className="py-1 pl-2">
+                    <select
+                      className="rounded border border-line px-1 py-1 text-xs"
+                      value={u.disposition ?? ""}
+                      onChange={(e) => setUnit(i, { disposition: e.target.value === "" ? null : (e.target.value as "sell" | "hold") })}
+                    >
+                      <option value="">Prorate</option>
+                      <option value="sell">Sell</option>
+                      <option value="hold">Hold</option>
+                    </select>
                   </td>
                   <td className="py-1 text-right">
                     <button type="button" onClick={() => removeUnit(i)} className="text-xs text-muted hover:text-ink">
@@ -525,7 +586,7 @@ export default function Underwriter({ initial }: { initial: DealState }) {
                 <td className="py-1.5 text-right">{money(result.totalMix.avgRent)}</td>
                 <td className="py-1.5 text-right">{Math.round(result.totalMix.avgSqft).toLocaleString()}</td>
                 <td className="py-1.5 text-right">{result.totalMix.avgRentPerSf.toFixed(2)}</td>
-                <td colSpan={2} className="py-1.5 text-right text-xs font-normal text-muted">
+                <td colSpan={5} className="py-1.5 text-right text-xs font-normal text-muted">
                   {Math.round(result.totalMix.totalSqft).toLocaleString()} net rentable SF
                 </td>
               </tr>

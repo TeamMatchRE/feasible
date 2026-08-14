@@ -19,6 +19,13 @@ const str = (v: FormDataEntryValue | null): string | null => {
   const s = String(v ?? "").trim();
   return s === "" ? null : s;
 };
+/**
+ * A JSON-parsed number that may legitimately be absent. NULL is meaningful on
+ * these columns — it means "follow the program", not "zero" — so anything that
+ * isn't a finite number is stored as NULL rather than coerced to 0.
+ */
+const nullableNum = (v: number | null | undefined): number | null =>
+  v == null || !Number.isFinite(v) ? null : v;
 
 /** Confirm the deal belongs to the caller before any write. */
 async function ownDeal(ownerId: string, dealId: string): Promise<boolean> {
@@ -66,6 +73,9 @@ export async function saveDeal(formData: FormData) {
     rent_monthly: number;
     sqft: number;
     sell_price: number | null;
+    cost_per_sf: number | null;
+    gross_factor: number | null;
+    disposition: "sell" | "hold" | null;
   }[];
 
   await sql`
@@ -97,10 +107,13 @@ export async function saveDeal(formData: FormData) {
     order += 1;
     await sql`
       insert into feasible.mf_unit_types
-        (deal_id, tier, label, unit_count, rent_monthly, sqft, sell_price, sort_order)
+        (deal_id, tier, label, unit_count, rent_monthly, sqft, sell_price,
+         cost_per_sf, gross_factor, disposition, sort_order)
       values (${dealId}, ${u.tier === "affordable" ? "affordable" : "market"}, ${u.label.trim()},
               ${Math.max(0, Math.round(u.unit_count || 0))}, ${u.rent_monthly || 0}, ${u.sqft || 0},
-              ${u.sell_price == null || Number.isNaN(u.sell_price) ? null : u.sell_price}, ${order})`;
+              ${nullableNum(u.sell_price)},
+              ${nullableNum(u.cost_per_sf)}, ${nullableNum(u.gross_factor)},
+              ${u.disposition === "sell" || u.disposition === "hold" ? u.disposition : null}, ${order})`;
   }
 
   revalidatePath(`/multifamily/${dealId}`);

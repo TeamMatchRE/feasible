@@ -18,6 +18,8 @@ import {
   type InfraLine,
   type ParkingType,
   type FinishLevel,
+  AMENITY_PRESETS,
+  amenityFromPreset,
 } from "@/lib/mf-costs";
 import { refineParkingAction, type RefineState } from "../actions";
 import { SubmitButton } from "@/components/SubmitButton";
@@ -87,13 +89,26 @@ export default function CostProgramPanel({
   // ---- common areas -------------------------------------------------------
   const setCommon = (id: string, patch: Partial<CommonArea>) =>
     set({ commonAreas: p.commonAreas.map((c) => (c.id === id ? { ...c, ...patch } : c)) });
-  const addCommon = (placement: CommonPlacement) =>
-    set({
-      commonAreas: [
-        ...p.commonAreas,
-        { id: `c${Date.now()}`, name: "", placement, sqft: 0, costPerSf: null },
-      ],
-    });
+  /**
+   * Add from the catalog, or a blank line. Either way the row is fully editable
+   * afterwards — a preset is a starting point with a defensible size on it, not
+   * a fixed product.
+   */
+  const addPreset = (presetId: string) => {
+    if (!presetId) return;
+    const uid = `c${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+    if (presetId === "__blank") {
+      set({ commonAreas: [...p.commonAreas, { id: uid, name: "", placement: "detached", sqft: 0, costPerSf: null, lumpCost: null }] });
+      return;
+    }
+    if (presetId === "__blank_lump") {
+      set({ commonAreas: [...p.commonAreas, { id: uid, name: "", placement: "detached", sqft: 0, costPerSf: null, lumpCost: 0 }] });
+      return;
+    }
+    const preset = AMENITY_PRESETS.find((a) => a.id === presetId);
+    if (preset) set({ commonAreas: [...p.commonAreas, amenityFromPreset(preset, uid)] });
+  };
+
   const removeCommon = (id: string) => set({ commonAreas: p.commonAreas.filter((c) => c.id !== id) });
 
   // ---- parking ------------------------------------------------------------
@@ -378,45 +393,75 @@ export default function CostProgramPanel({
                 </tr>
               </thead>
               <tbody>
+                {p.commonAreas.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-3 text-xs text-muted">
+                      No amenity program yet. Add what this community is actually getting from
+                      the picker below, then re-cost each line.
+                    </td>
+                  </tr>
+                )}
                 {p.commonAreas.map((c) => {
+                  // A lump line is a pool or a gate: it costs money, encloses no
+                  // building, and has no SF or $/SF to show.
+                  const lump = c.lumpCost != null;
                   const rate = c.costPerSf ?? (c.placement === "attached" ? rates.attachedCommon : rates.detachedCommon);
                   return (
                     <tr key={c.id} className="border-b border-line/50">
                       <td className="py-1 pr-2">
                         <input
                           className="w-full min-w-[7rem] rounded border border-line px-2 py-1 text-sm"
-                          placeholder="e.g. Lobby"
+                          placeholder={lump ? "e.g. Dog park" : "e.g. Lobby"}
                           value={c.name}
                           onChange={(e) => setCommon(c.id, { name: e.target.value })}
                         />
                       </td>
                       <td className="py-1 pr-2">
-                        <select
-                          className="rounded border border-line px-1 py-1 text-xs"
-                          value={c.placement}
-                          onChange={(e) => setCommon(c.id, { placement: e.target.value as CommonPlacement })}
-                        >
-                          <option value="attached">Attached</option>
-                          <option value="detached">Detached</option>
-                        </select>
+                        {lump ? (
+                          <span className="text-xs text-muted">Lump sum</span>
+                        ) : (
+                          <select
+                            className="rounded border border-line px-1 py-1 text-xs"
+                            value={c.placement}
+                            onChange={(e) => setCommon(c.id, { placement: e.target.value as CommonPlacement })}
+                          >
+                            <option value="attached">Attached</option>
+                            <option value="detached">Detached</option>
+                          </select>
+                        )}
                       </td>
                       <td className="py-1 text-right">
-                        <input
-                          className={cellSm}
-                          inputMode="numeric"
-                          value={String(c.sqft)}
-                          onChange={(e) => setCommon(c.id, { sqft: numOr(e.target.value) })}
-                        />
+                        {lump ? (
+                          <span className="text-xs text-muted">—</span>
+                        ) : (
+                          <input
+                            className={cellSm}
+                            inputMode="numeric"
+                            value={String(c.sqft)}
+                            onChange={(e) => setCommon(c.id, { sqft: numOr(e.target.value) })}
+                          />
+                        )}
                       </td>
                       <td className="py-1 text-right">
-                        <RateInput
-                          value={c.costPerSf}
-                          fallback={c.placement === "attached" ? rates.attachedCommon : rates.detachedCommon}
-                          onChange={(n) => setCommon(c.id, { costPerSf: n })}
-                          className={cellSm}
-                        />
+                        {lump ? (
+                          <input
+                            className={cellSm}
+                            inputMode="numeric"
+                            value={String(c.lumpCost ?? 0)}
+                            onChange={(e) => setCommon(c.id, { lumpCost: numOr(e.target.value) })}
+                          />
+                        ) : (
+                          <RateInput
+                            value={c.costPerSf}
+                            fallback={c.placement === "attached" ? rates.attachedCommon : rates.detachedCommon}
+                            onChange={(n) => setCommon(c.id, { costPerSf: n })}
+                            className={cellSm}
+                          />
+                        )}
                       </td>
-                      <td className="py-1 text-right text-muted">{c.sqft > 0 ? money(c.sqft * rate) : "—"}</td>
+                      <td className="py-1 text-right text-muted">
+                        {lump ? money(c.lumpCost ?? 0) : c.sqft > 0 ? money(c.sqft * rate) : "—"}
+                      </td>
                       <td className="py-1 pl-2 text-right">
                         <button
                           type="button"
@@ -443,21 +488,38 @@ export default function CostProgramPanel({
               </tbody>
             </table>
           </div>
-          <div className="mt-2 flex gap-2">
-            <button
-              type="button"
-              onClick={() => addCommon("attached")}
-              className="rounded border border-line px-2 py-1 text-xs hover:bg-black/[0.03]"
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <label className="text-xs text-muted" htmlFor="amenity-picker">
+              Add amenity
+            </label>
+            <select
+              id="amenity-picker"
+              className="rounded border border-line px-2 py-1 text-xs"
+              value=""
+              onChange={(e) => {
+                addPreset(e.target.value);
+                e.currentTarget.value = "";
+              }}
             >
-              + Attached
-            </button>
-            <button
-              type="button"
-              onClick={() => addCommon("detached")}
-              className="rounded border border-line px-2 py-1 text-xs hover:bg-black/[0.03]"
-            >
-              + Detached
-            </button>
+              <option value="">Choose a feature…</option>
+              {[...new Set(AMENITY_PRESETS.map((a) => a.group))].map((group) => (
+                <optgroup key={group} label={group}>
+                  {AMENITY_PRESETS.filter((a) => a.group === group).map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                      {a.sqft ? ` — ${a.sqft.toLocaleString()} SF` : a.lump ? ` — ${money(a.lump)}` : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+              <optgroup label="Custom">
+                <option value="__blank">Blank building (per SF)</option>
+                <option value="__blank_lump">Blank amenity (lump sum)</option>
+              </optgroup>
+            </select>
+            <span className="text-[11px] text-muted">
+              Sizes and costs are illustrative starting points — edit every line.
+            </span>
           </div>
         </Section>
       </div>
