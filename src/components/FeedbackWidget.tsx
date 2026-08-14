@@ -149,11 +149,23 @@ export default function FeedbackWidget({
 
   return (
     <>
+      {/* Screen-only. Will, 7/24, printing a CMA: "is there a way to get rid of
+          the timestamp and feedback button." A client-facing print — a CMA, a
+          report, an offer packet — must never carry internal chrome, and this
+          widget rides in EVERY app, so it was landing on all of them. Same hook
+          and self-sufficient inline rule as LilyPadLink, which is already
+          print-hidden; the two pills sit in opposite bottom corners and should
+          disappear together. (The URL and "1/4" in his screenshot are the
+          browser's own print header — not ours to remove.) */}
+      <style>{`@media print { .feedback-widget { display: none !important; } }`}</style>
+
       {/* Launcher */}
       {!open && (
         <button
           onClick={() => setOpen(true)}
           aria-label="Leave feedback or a suggestion"
+          className="feedback-widget"
+          data-screen-only
           style={{
             position: "fixed",
             right: 20,
@@ -187,6 +199,8 @@ export default function FeedbackWidget({
           role="dialog"
           aria-label="Feedback"
           onPaste={onPaste}
+          className="feedback-widget"
+          data-screen-only
           style={{
             position: "fixed",
             right: 20,
