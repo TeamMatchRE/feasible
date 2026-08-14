@@ -162,26 +162,36 @@ export type UpdateRow = {
   body_text: string | null;
   status: "draft" | "approved" | "sent";
   recipients: { name: string; email: string | null }[];
+  /** Per-addressee outcome — partial delivery is normal; see src/lib/mailer.ts. */
+  delivery: { name: string; email: string | null; ok: boolean; error?: string; at: string }[];
+  send_error: string | null;
   created_at: string;
   sent_at: string | null;
 };
 
 export async function listUpdates(projectId: string): Promise<UpdateRow[]> {
   const rows = await sql<Record<string, unknown>[]>`
-    select id, brief, subject, body_html, body_text, status, recipients, created_at, sent_at
+    select id, brief, subject, body_html, body_text, status, recipients,
+           delivery, send_error, created_at, sent_at
     from feasible.investor_updates
     where project_id = ${projectId}
     order by created_at desc`;
   return rows.map((r) => ({
     ...(r as unknown as UpdateRow),
     recipients: asJson<UpdateRow["recipients"]>(r.recipients, []),
+    delivery: asJson<UpdateRow["delivery"]>(r.delivery, []),
   }));
 }
 
 export async function loadUpdate(id: string, projectId: string): Promise<UpdateRow | null> {
   const [r] = await sql<Record<string, unknown>[]>`
-    select id, brief, subject, body_html, body_text, status, recipients, created_at, sent_at
+    select id, brief, subject, body_html, body_text, status, recipients,
+           delivery, send_error, created_at, sent_at
     from feasible.investor_updates where id = ${id} and project_id = ${projectId}`;
   if (!r) return null;
-  return { ...(r as unknown as UpdateRow), recipients: asJson<UpdateRow["recipients"]>(r.recipients, []) };
+  return {
+    ...(r as unknown as UpdateRow),
+    recipients: asJson<UpdateRow["recipients"]>(r.recipients, []),
+    delivery: asJson<UpdateRow["delivery"]>(r.delivery, []),
+  };
 }

@@ -7,6 +7,8 @@ import { loadCompanyForProject, listInvestments, listUpdates } from "@/lib/hpd-q
 import { sql } from "@/db";
 import ProjectNav from "../ProjectNav";
 import UpdateComposer from "./UpdateComposer";
+import SendPanel from "./SendPanel";
+import { mailConfigured, mailFromAddress } from "@/lib/mailer";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +38,8 @@ export default async function UpdatesPage({ params }: { params: Promise<{ id: st
   const company = await loadCompanyForProject(id);
   const investments = await listInvestments(id);
   const updates = await listUpdates(id);
+  const mailReady = mailConfigured();
+  const mailFrom = mailFromAddress();
 
   const recipients = investments.filter((i) => i.status !== "prospect");
   const missingEmail = recipients.filter((r) => !r.email);
@@ -101,6 +105,15 @@ export default async function UpdatesPage({ params }: { params: Promise<{ id: st
                   <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{u.brief}</p>
                   <p className="mt-3 text-[11px] uppercase tracking-wide text-muted">The letter</p>
                   <p className="mt-1 whitespace-pre-wrap text-sm text-ink">{u.body_text}</p>
+                  {editable && (
+                    <SendPanel
+                      projectId={id}
+                      update={u}
+                      recipients={recipients.map((r) => ({ name: r.name, email: r.email }))}
+                      mailReady={mailReady}
+                      mailFrom={mailFrom}
+                    />
+                  )}
                 </div>
               </details>
             ))}
