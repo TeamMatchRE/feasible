@@ -14,6 +14,7 @@ const TABS = [
   { href: "/capital", label: "Capital" },
   { href: "/lots", label: "Lots" },
   { href: "/updates", label: "Investor updates" },
+  { href: "/files", label: "Files" },
 ] as const;
 
 export default function ProjectNav({ dealId, active }: { dealId: string; active: string }) {
