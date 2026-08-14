@@ -8,6 +8,7 @@ import CompsPanel from "./CompsPanel";
 import SharePanel from "./SharePanel";
 import { canWrite, canManage, listCollaborators, dealOwner } from "@/lib/mf-access";
 import ScenarioBar from "./ScenarioBar";
+import ProjectNav from "./ProjectNav";
 import { listScenarios } from "@/lib/mf-scenarios";
 
 export const dynamic = "force-dynamic";
@@ -81,6 +82,8 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
         </div>
         {canManage(role) && <SharePanel dealId={deal.id} collaborators={collaborators} />}
       </div>
+
+      <ProjectNav dealId={deal.id} active="" />
 
       <ScenarioBar
         dealId={deal.id}

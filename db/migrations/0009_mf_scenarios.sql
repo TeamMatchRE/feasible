@@ -99,11 +99,21 @@ update feasible.mf_deals d
  where s.deal_id = d.id
    and d.active_scenario_id is null;
 
-update feasible.mf_unit_types u
-   set scenario_id = d.active_scenario_id
-  from feasible.mf_deals d
- where u.deal_id = d.id
-   and u.scenario_id is null;
+-- ⚠️ REPLAY GUARD. deal_id is dropped further down, and every migration file is
+-- replayed on every run (scripts/migrate.ts keeps no applied-migrations table),
+-- so this backfill must become a no-op once the column is gone.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'feasible' and table_name = 'mf_unit_types'
+                and column_name = 'deal_id') then
+    update feasible.mf_unit_types u
+       set scenario_id = d.active_scenario_id
+      from feasible.mf_deals d
+     where u.deal_id = d.id
+       and u.scenario_id is null;
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- Re-parent for good. Any unit row still lacking a scenario at this point is an

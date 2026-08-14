@@ -66,7 +66,19 @@ create table if not exists feasible.mf_unit_types (
     sort_order      integer not null default 0
 );
 
-create index if not exists mf_unit_types_deal_idx on feasible.mf_unit_types (deal_id, tier, sort_order);
+-- ⚠️ REPLAY GUARD. 0009 re-parents this table from deal to scenario and DROPS
+-- deal_id. Every migration file is replayed on every run (scripts/migrate.ts
+-- keeps no applied-migrations table), so this must not fail once that has
+-- happened. 0009 creates the replacement index on scenario_id.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'feasible' and table_name = 'mf_unit_types'
+                and column_name = 'deal_id') then
+    create index if not exists mf_unit_types_deal_idx
+      on feasible.mf_unit_types (deal_id, tier, sort_order);
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- COMPS — rent comps and for-sale comps, on the same table.
@@ -115,11 +127,21 @@ create policy mf_deals_owner on feasible.mf_deals
   for all to authenticated
   using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
-drop policy if exists mf_unit_types_owner on feasible.mf_unit_types;
-create policy mf_unit_types_owner on feasible.mf_unit_types
-  for all to authenticated
-  using (exists (select 1 from feasible.mf_deals d where d.id = deal_id and d.owner_id = auth.uid()))
-  with check (exists (select 1 from feasible.mf_deals d where d.id = deal_id and d.owner_id = auth.uid()));
+-- ⚠️ Same replay guard as the index above: after 0009 this policy is rebuilt
+-- against scenario_id, and re-creating the deal_id version would both fail and
+-- clobber the correct one.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'feasible' and table_name = 'mf_unit_types'
+                and column_name = 'deal_id') then
+    drop policy if exists mf_unit_types_owner on feasible.mf_unit_types;
+    create policy mf_unit_types_owner on feasible.mf_unit_types
+      for all to authenticated
+      using (exists (select 1 from feasible.mf_deals d where d.id = deal_id and d.owner_id = auth.uid()))
+      with check (exists (select 1 from feasible.mf_deals d where d.id = deal_id and d.owner_id = auth.uid()));
+  end if;
+end $$;
 
 drop policy if exists mf_comps_owner on feasible.mf_comps;
 create policy mf_comps_owner on feasible.mf_comps
