@@ -298,11 +298,72 @@ export default function Underwriter({ initial }: { initial: DealState }) {
       {/* ---------- The answer, kept at the top ---------- */}
       <section className="rounded-lg border border-line bg-white p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold text-ink">Build to rent, sell out, or blend</h2>
-          <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">{ex.recommendation.best}</span>
+          <h2 className="text-sm font-semibold text-ink">
+            {ex.designated ? "The program as designated" : "Build to rent, sell out, or blend"}
+          </h2>
+          <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+            {ex.designated ? "Designated" : ex.recommendation.best}
+          </span>
         </div>
         <p className="mt-1 text-xs text-muted">{ex.recommendation.note}</p>
 
+        {/*
+          A designated program has no exit to choose, so the three-way comparison is
+          replaced by the plan's two halves plus its total. Build-to-rent and sell-out
+          are NOT shown here: with the mix designated they measure one portion's
+          revenue against the whole project's cost, which reads as a huge loss that
+          isn't real. See the warnings in analyzeExits.
+        */}
+        {ex.designated && ex.portions ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="rounded border border-line p-3">
+              <p className="text-xs uppercase tracking-wide text-muted">
+                Sold portion — {ex.portions.sold.units.toLocaleString()} units
+              </p>
+              {ex.portions.sold.priced ? (
+                <>
+                  <p className="mt-0.5 text-xl font-semibold text-ink">{money(ex.portions.sold.netProceeds)}</p>
+                  <p className="text-xs text-muted">
+                    net of {money(ex.portions.sold.saleCosts)} selling costs ·{" "}
+                    {money(ex.portions.sold.proceedsPerUnit)}/unit
+                  </p>
+                  <p className="mt-1 text-xs text-muted">gross {money(ex.portions.sold.grossProceeds)}</p>
+                </>
+              ) : (
+                <p className="mt-0.5 text-sm text-muted">
+                  Not priced. Set a sale price on the types marked Sell (or pull one from a for-sale
+                  comp below).
+                </p>
+              )}
+            </div>
+            <div className="rounded border border-line p-3">
+              <p className="text-xs uppercase tracking-wide text-muted">
+                Held portion — {ex.portions.held.units.toLocaleString()} units
+              </p>
+              <p className="mt-0.5 text-xl font-semibold text-ink">{money(ex.portions.held.netValue)}</p>
+              <p className="text-xs text-muted">
+                NOI {money(ex.portions.held.noi)} ÷ {pct(ex.portions.held.capRate)} ={" "}
+                {money(ex.portions.held.grossValue)} · {money(ex.portions.held.valuePerUnit)}/unit
+              </p>
+              <p className="mt-1 text-xs text-muted">net of {money(ex.portions.held.saleCosts)} sale costs</p>
+            </div>
+            <div className="rounded border border-line p-3">
+              <p className="text-xs uppercase tracking-wide text-muted">The plan</p>
+              <p
+                className={`mt-0.5 text-xl font-semibold ${ex.blend.profit < 0 ? "text-red-600" : "text-ink"}`}
+              >
+                {money(ex.blend.profit)}
+              </p>
+              <p className="text-xs text-muted">
+                total value {money(ex.blend.totalValue)} · margin {pct(ex.blend.profitMargin, 1)}
+              </p>
+              <p className="mt-1 text-xs text-muted">
+                Cost is not split between the two halves — one site serves both, so profit belongs to
+                the plan as a whole.
+              </p>
+            </div>
+          </div>
+        ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <div className="rounded border border-line p-3">
             <p className="text-xs uppercase tracking-wide text-muted">Build to rent</p>
@@ -352,6 +413,7 @@ export default function Underwriter({ initial }: { initial: DealState }) {
             </label>
           </div>
         </div>
+        )}
       </section>
 
       {/* ---------- The answer stays above the tabs; the inputs split below ------- */}

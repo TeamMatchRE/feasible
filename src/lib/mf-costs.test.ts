@@ -502,6 +502,59 @@ test("designated mode reports the plan rather than picking a winner", () => {
   near(r.exit.recommendation.profit, r.exit.blend.profit);
 });
 
+test("per-unit figures divide by the units they came from, not the whole deal", () => {
+  // Found in prod on Shuly's Place: the sell-out card read $265,556/unit because
+  // $59.75M of proceeds from 105 sold units was divided by all 225 units in the
+  // deal. The designated filter had been applied to the numerators and not the
+  // denominators.
+  const e = underwrite(designatedBase).exit;
+
+  // $5,000,000 from TEN houses is $500,000 each — not $45,454 (÷110).
+  near(e.sellOut.proceedsPerUnit, 500_000);
+  // The held value came from 100 flats, so it is spread over 100.
+  near(e.btr.valuePerUnit, 2_300_000 / 0.055 / 100);
+});
+
+test("a designated plan reports its two halves, and they sum to the plan", () => {
+  const e = underwrite(designatedBase).exit;
+  assert.equal(e.designated, true);
+  const p = e.portions!;
+
+  assert.equal(p.sold.units, 10);
+  assert.equal(p.held.units, 100);
+  near(p.sold.netProceeds, 4_750_000);
+  near(p.held.netValue, 2_300_000 / 0.055);
+
+  // The whole point: the halves are the plan, so they must add up to it.
+  near(p.sold.netProceeds + p.held.netValue, e.blend.totalValue);
+  near(p.sold.netProceeds + p.held.netValue - 30_000_000, e.blend.profit);
+});
+
+test("build-to-rent and sell-out are not offered as exits once a program is designated", () => {
+  // They stay computed for the non-designated path, but each measures ONE
+  // portion's revenue against the WHOLE project's cost, so neither is a real
+  // scenario. `designated` is the flag that tells the UI to hide them; this test
+  // exists so nobody re-reads them as a comparison later.
+  const e = underwrite(designatedBase).exit;
+  assert.equal(e.designated, true);
+  assert.equal(e.recommendation.best, "Blend");
+
+  // Demonstrating the incoherence rather than describing it: BTR "profit" charges
+  // the full $30M cost against only the held units' capitalized value.
+  near(e.btr.profit, 2_300_000 / 0.055 - 30_000_000);
+  assert.ok(e.btr.profit < e.blend.profit, "the partial-revenue figure is worse than the real plan");
+});
+
+test("a non-designated deal still divides per-unit by every unit", () => {
+  const e = underwrite({ ...base, sellOut: { saleCostPct: 0.05, shareSold: 0.5 } }).exit;
+  assert.notEqual(e.designated, true);
+  assert.equal(e.portions, undefined);
+  // Sell-out means sell EVERYTHING here, so the whole mix is the denominator.
+  const units = base.marketUnits.reduce((s, u) => s + u.count, 0);
+  near(e.sellOut.proceedsPerUnit, e.sellOut.grossProceeds / units);
+  near(e.btr.valuePerUnit, e.btr.grossValue / units);
+});
+
 test("an undeclared type in a designated mix is held, not silently sold", () => {
   const r = underwrite({
     ...designatedBase,

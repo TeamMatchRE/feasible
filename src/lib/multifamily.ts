@@ -308,6 +308,36 @@ export type ExitAnalysis = {
     profit: number;
     profitMargin: number;
   };
+  /**
+   * True when the mix designates dispositions per type. When set, `btr` and
+   * `sellOut` are NOT comparable exits — read `portions` instead, and take profit
+   * from `blend`. See the warnings in analyzeExits.
+   */
+  designated?: boolean;
+  /**
+   * The two halves of a designated plan. Null/absent unless `designated`.
+   * Deliberately carries no per-portion profit or yield: project cost is not split
+   * between the sold and held sides.
+   */
+  portions?: {
+    sold: {
+      units: number;
+      grossProceeds: number;
+      saleCosts: number;
+      netProceeds: number;
+      proceedsPerUnit: number;
+      priced: boolean;
+    };
+    held: {
+      units: number;
+      noi: number;
+      capRate: number;
+      grossValue: number;
+      saleCosts: number;
+      netValue: number;
+      valuePerUnit: number;
+    };
+  };
   /** Which exit wins on profit, and by how much. */
   recommendation: {
     best: "Build to Rent" | "Sell Out" | "Blend";
@@ -472,8 +502,19 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   const designated = isDesignated(allUnits);
   const soldTypes = designated ? allUnits.filter((u) => dispositionOf(u) === "sell") : allUnits;
   const heldTypes = designated ? allUnits.filter((u) => dispositionOf(u) === "hold") : allUnits;
+  const soldUnitCount = sum(soldTypes.map((u) => u.count));
+  const heldUnitCount = sum(heldTypes.map((u) => u.count));
 
   // --- Build to rent -------------------------------------------------------
+  // ⚠️ In designated mode `pf.noi` is the HELD units' income only, while `cost` is
+  // the whole project. So `profit`, `returnOnCost` and `developmentSpreadBps` below
+  // divide a partial numerator by a whole-deal denominator and DO NOT describe a
+  // real scenario — 120 units of income measured against 225 units of cost. They
+  // are not "build to rent as a hypothetical"; a true one would need rents on the
+  // for-sale types, which by definition don't have any.
+  //
+  // The UI must not present them as an exit when `designated` is set — it renders
+  // `portions` instead. Kept computed so the non-designated path is untouched.
   const grossValue = safeDiv(pf.noi, i.exit.capRate);
   const btrSaleCosts = grossValue * i.exit.saleCostPct;
   const btrNet = grossValue - btrSaleCosts;
@@ -482,7 +523,8 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
     grossValue,
     saleCosts: btrSaleCosts,
     netValue: btrNet,
-    valuePerUnit: safeDiv(grossValue, totalUnits),
+    // Per-unit follows the units the value actually came from, not the whole deal.
+    valuePerUnit: safeDiv(grossValue, designated ? heldUnitCount : totalUnits),
     profit: btrNet - cost,
     returnOnCost,
     // The spread is the whole game in merchant building: build at a yield above the
@@ -494,6 +536,9 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   // --- Sell out ------------------------------------------------------------
   // A unit with no sale price contributes nothing; if NOTHING is priced we say so
   // rather than reporting a confident $0.
+  // ⚠️ Same caveat as `btr` above: in designated mode these are the SOLD types'
+  // proceeds against the whole project's cost, so `profit` and `profitMargin` are
+  // not a "sell everything" scenario. The UI renders `portions` instead.
   const priced = soldTypes.some((u) => (u.sellPrice ?? 0) > 0);
   const grossProceeds = sum(soldTypes.map((u) => u.count * (u.sellPrice ?? 0)));
   const sellCosts = grossProceeds * i.sellOut.saleCostPct;
@@ -502,7 +547,8 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
     grossProceeds,
     saleCosts: sellCosts,
     netProceeds,
-    proceedsPerUnit: safeDiv(grossProceeds, totalUnits),
+    // Per-unit over the units actually sold, not every unit in the deal.
+    proceedsPerUnit: safeDiv(grossProceeds, designated ? soldUnitCount : totalUnits),
     profit: netProceeds - cost,
     profitMargin: safeDiv(netProceeds - cost, cost),
     priced,
@@ -516,7 +562,6 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   // types are sold whole and the held types are held whole. `pf.noi` is already
   // the held-only NOI (see buildProforma), so it is capitalized as-is rather
   // than scaled by a share that no longer means anything.
-  const soldUnitCount = sum(soldTypes.map((u) => u.count));
   const share = designated
     ? safeDiv(soldUnitCount, totalUnits)
     : Math.min(Math.max(i.sellOut.shareSold, 0), 1);
@@ -544,11 +589,44 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
   // against a program that sells 105 houses would be answering a question nobody
   // asked. The other two stay populated as hypotheticals for the reader.
   if (designated) {
-    const heldUnitCount = sum(heldTypes.map((u) => u.count));
     return {
       btr,
       sellOut,
       blend,
+      designated: true,
+      /**
+       * The plan's two halves — what the blend is actually made of.
+       *
+       * This exists because `btr` and `sellOut` become category errors once a
+       * program is designated (see the warnings above), and showing them as
+       * headline exits reads as a catastrophic loss that isn't real. The sold and
+       * held portions ARE meaningful, and together they are the whole plan.
+       *
+       * Neither half carries a yield-on-cost or a profit, and that is deliberate:
+       * the project cost is NOT split between them. One road, one clubhouse and
+       * one set of permits serve both, and any split would be an allocation we
+       * invented. Profit is a property of the plan as a whole — it lives on
+       * `blend`.
+       */
+      portions: {
+        sold: {
+          units: soldUnitCount,
+          grossProceeds,
+          saleCosts: sellCosts,
+          netProceeds,
+          proceedsPerUnit: safeDiv(grossProceeds, soldUnitCount),
+          priced,
+        },
+        held: {
+          units: heldUnitCount,
+          noi: pf.noi,
+          capRate: i.exit.capRate,
+          grossValue,
+          saleCosts: btrSaleCosts,
+          netValue: btrNet,
+          valuePerUnit: safeDiv(grossValue, heldUnitCount),
+        },
+      },
       recommendation: {
         best: "Blend",
         profit: blend.profit,
@@ -556,7 +634,8 @@ export function analyzeExits(i: MultiFamilyInputs, pf: Proforma, allUnits: UnitT
         note:
           `Program is designated: ${soldUnitCount} units sold, ${heldUnitCount} held. ` +
           `The blend is the plan, not the winner of a comparison — profit is ` +
-          `sell-out proceeds plus the capitalized value of the held units.`,
+          `sell-out proceeds plus the capitalized value of the held units, ` +
+          `measured against the whole project's cost.`,
       },
     };
   }
