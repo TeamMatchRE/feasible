@@ -35,6 +35,20 @@ export default function ScenarioBar({
   const [mode, setMode] = useState<"idle" | "rename" | "new" | "confirmDelete">("idle");
   const active = scenarios.find((s) => s.id === activeId);
 
+  /**
+   * Close whatever panel is open as soon as its form is submitted.
+   *
+   * These are server actions: the page revalidates but this component keeps its
+   * state, so an open panel survives the very action that finished it. For the
+   * delete confirmation that is not just untidy — it re-arms itself against
+   * whichever scenario is active NEXT, so a second reflexive click deletes a case
+   * nobody asked to delete. Found by deleting a scenario and watching the prompt
+   * re-point at the survivor.
+   *
+   * Called from onSubmit without preventDefault, so the action still fires.
+   */
+  const closePanel = () => setMode("idle");
+
   return (
     <div className="mb-4 rounded-lg border border-line bg-white px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -116,7 +130,7 @@ export default function ScenarioBar({
       )}
 
       {mode === "new" && canEdit && (
-        <form action={newScenario} className="mt-3 flex flex-wrap items-end gap-2">
+        <form action={newScenario} onSubmit={closePanel} className="mt-3 flex flex-wrap items-end gap-2">
           <input type="hidden" name="dealId" value={dealId} />
           <input type="hidden" name="from" value={activeId} />
           <label className="text-xs">
@@ -144,7 +158,7 @@ export default function ScenarioBar({
       )}
 
       {mode === "rename" && canEdit && (
-        <form action={updateScenario} className="mt-3 flex flex-wrap items-end gap-2">
+        <form action={updateScenario} onSubmit={closePanel} className="mt-3 flex flex-wrap items-end gap-2">
           <input type="hidden" name="dealId" value={dealId} />
           <input type="hidden" name="scenarioId" value={activeId} />
           <label className="text-xs">
@@ -174,7 +188,7 @@ export default function ScenarioBar({
       )}
 
       {mode === "confirmDelete" && canEdit && (
-        <form action={removeScenario} className="mt-3 flex flex-wrap items-center gap-3">
+        <form action={removeScenario} onSubmit={closePanel} className="mt-3 flex flex-wrap items-center gap-3">
           <input type="hidden" name="dealId" value={dealId} />
           <input type="hidden" name="scenarioId" value={activeId} />
           <span className="text-xs text-ink">
