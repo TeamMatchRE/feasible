@@ -111,6 +111,10 @@ export default async function GoogleSettingsPage({
             </dd>
           </div>
           <div className="flex flex-wrap items-baseline gap-2">
+            <dt className="w-40 shrink-0 text-muted">Client ID in use</dt>
+            <dd className="break-all font-mono text-ink">{diag.clientIdPrefix ?? "—"}</dd>
+          </div>
+          <div className="flex flex-wrap items-baseline gap-2">
             <dt className="w-40 shrink-0 text-muted">Redirect URI</dt>
             <dd className="break-all font-mono text-ink">{diag.redirectUri}</dd>
           </div>
@@ -147,10 +151,11 @@ export default async function GoogleSettingsPage({
         </ol>
 
         <p className="mt-3 text-[11px] leading-relaxed text-muted">
-          Feasible already has values for both variables, left over from an earlier NextAuth
-          scaffold. If they belong to a usable client, adding the redirect URI above and enabling
-          the Drive API may be all that&rsquo;s needed — try <strong>Connect</strong> and read the
-          error.
+          <strong className="text-ink">If Google says redirect_uri_mismatch:</strong> the app is
+          sending the URI above, so either it isn&rsquo;t registered on the client shown above
+          (check the client ID matches the one you edited — a URI added to a <em>different</em>
+          client is the usual cause), or it was added but Google hasn&rsquo;t propagated it yet,
+          which can take a few minutes.
         </p>
       </div>
 

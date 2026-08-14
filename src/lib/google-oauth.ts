@@ -174,10 +174,18 @@ export async function accessTokenFor(profileId: string): Promise<
  * is diagnosable without reading Vercel's env list.
  */
 export function oauthDiagnostics() {
+  const id = clientId();
   return {
     configured: googleConfigured(),
-    hasClientId: !!clientId(),
+    hasClientId: !!id,
     hasClientSecret: !!clientSecret(),
+    /**
+     * The client ID's leading segment — enough to check against the console at a
+     * glance, and not a secret (client IDs are public; the secret is the secret).
+     * This is the fastest way to catch the commonest failure: a redirect URI
+     * registered on a NEW client while the deployment still carries an OLD one.
+     */
+    clientIdPrefix: id ? `${id.split("-")[0]}-${(id.split("-")[1] ?? "").slice(0, 6)}…` : null,
     redirectUri: redirectUri(),
     scopes: DRIVE_SCOPES,
   };
