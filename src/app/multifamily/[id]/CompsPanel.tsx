@@ -13,7 +13,7 @@ import { searchComps, confirmComp, deleteComp, applyCompToMix } from "../actions
 
 const money = (n: number | null) => (n == null ? "—" : `$${Math.round(n).toLocaleString("en-US")}`);
 
-function CompCard({ comp, dealId }: { comp: MfComp; dealId: string }) {
+function CompCard({ comp, dealId, canEdit }: { comp: MfComp; dealId: string; canEdit: boolean }) {
   const detail = Array.isArray(comp.detail) ? comp.detail : [];
   return (
     <div className={`rounded border p-3 ${comp.confirmed ? "border-line" : "border-dashed border-line"}`}>
@@ -35,7 +35,7 @@ function CompCard({ comp, dealId }: { comp: MfComp; dealId: string }) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!comp.confirmed && (
+          {canEdit && !comp.confirmed && (
             <form action={confirmComp}>
               <input type="hidden" name="dealId" value={dealId} />
               <input type="hidden" name="compId" value={comp.id} />
@@ -44,7 +44,7 @@ function CompCard({ comp, dealId }: { comp: MfComp; dealId: string }) {
               </SubmitButton>
             </form>
           )}
-          {comp.confirmed && (
+          {canEdit && comp.confirmed && (
             <form action={applyCompToMix}>
               <input type="hidden" name="dealId" value={dealId} />
               <input type="hidden" name="compId" value={comp.id} />
@@ -53,11 +53,13 @@ function CompCard({ comp, dealId }: { comp: MfComp; dealId: string }) {
               </SubmitButton>
             </form>
           )}
-          <form action={deleteComp}>
-            <input type="hidden" name="dealId" value={dealId} />
-            <input type="hidden" name="compId" value={comp.id} />
-            <SubmitButton className="text-xs text-muted hover:text-ink">Remove</SubmitButton>
-          </form>
+          {canEdit && (
+            <form action={deleteComp}>
+              <input type="hidden" name="dealId" value={dealId} />
+              <input type="hidden" name="compId" value={comp.id} />
+              <SubmitButton className="text-xs text-muted hover:text-ink">Remove</SubmitButton>
+            </form>
+          )}
         </div>
       </div>
 
@@ -102,7 +104,14 @@ function CompCard({ comp, dealId }: { comp: MfComp; dealId: string }) {
   );
 }
 
-export default function CompsPanel({ dealId, comps }: { dealId: string; comps: MfComp[] }) {
+/**
+ * `canEdit` is false for a viewer on a shared deal. Comp search writes rows and
+ * spends an AI call, and confirm/apply mutate the deal, so those controls are
+ * hidden — the server refuses them regardless (see actions.ts).
+ */
+export default function CompsPanel({
+  dealId, comps, canEdit = true,
+}: { dealId: string; comps: MfComp[]; canEdit?: boolean }) {
   const rent = comps.filter((c) => c.kind === "rent");
   const sale = comps.filter((c) => c.kind === "sale");
 
@@ -117,6 +126,8 @@ export default function CompsPanel({ dealId, comps }: { dealId: string; comps: M
           </p>
         </div>
         <div className="flex gap-2">
+          {canEdit && (
+          <>
           <form action={searchComps}>
             <input type="hidden" name="dealId" value={dealId} />
             <input type="hidden" name="kind" value="rent" />
@@ -137,6 +148,8 @@ export default function CompsPanel({ dealId, comps }: { dealId: string; comps: M
               Find for-sale comps
             </SubmitButton>
           </form>
+          </>
+          )}
         </div>
       </div>
 
@@ -150,7 +163,7 @@ export default function CompsPanel({ dealId, comps }: { dealId: string; comps: M
           ) : (
             <div className="space-y-2">
               {rent.map((c) => (
-                <CompCard key={c.id} comp={c} dealId={dealId} />
+                <CompCard key={c.id} comp={c} dealId={dealId} canEdit={canEdit} />
               ))}
             </div>
           )}
@@ -164,7 +177,7 @@ export default function CompsPanel({ dealId, comps }: { dealId: string; comps: M
           ) : (
             <div className="space-y-2">
               {sale.map((c) => (
-                <CompCard key={c.id} comp={c} dealId={dealId} />
+                <CompCard key={c.id} comp={c} dealId={dealId} canEdit={canEdit} />
               ))}
             </div>
           )}

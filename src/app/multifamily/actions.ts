@@ -3,8 +3,16 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { sql } from "@/db";
-import { requireUser } from "@/lib/session";
+import { requireUser, type SessionUser } from "@/lib/session";
+import { emailAllowed } from "@/lib/workspace";
 import { loadMfDeal, type MfAssumptions } from "@/lib/mf-queries";
+import {
+  dealRole,
+  canWrite,
+  requireDealOwner,
+  grantAccess,
+  revokeAccess,
+} from "@/lib/mf-access";
 import { findComps, type CompKind } from "@/lib/mf-comps-ai";
 import { refineParking, type ParkingRefinement } from "@/lib/mf-parking-ai";
 import type { LineDetails } from "@/lib/multifamily";
@@ -27,11 +35,15 @@ const str = (v: FormDataEntryValue | null): string | null => {
 const nullableNum = (v: number | null | undefined): number | null =>
   v == null || !Number.isFinite(v) ? null : v;
 
-/** Confirm the deal belongs to the caller before any write. */
-async function ownDeal(ownerId: string, dealId: string): Promise<boolean> {
-  const rows = await sql<{ id: string }[]>`
-    select id from feasible.mf_deals where id = ${dealId} and owner_id = ${ownerId}`;
-  return rows.length > 0;
+/**
+ * Confirm the caller may WRITE this deal — owner or editor.
+ *
+ * A deal can be shared now, so this is no longer an owner_id comparison; it asks
+ * src/lib/mf-access.ts, which is the single place that knows the rules. Deleting
+ * the deal and managing its sharing are owner-only and use requireDealOwner.
+ */
+async function canEditDeal(user: SessionUser, dealId: string): Promise<boolean> {
+  return canWrite(await dealRole(user, dealId));
 }
 
 export async function createDeal(formData: FormData) {
@@ -60,7 +72,7 @@ export async function deleteDeal(formData: FormData) {
 export async function saveDeal(formData: FormData) {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
-  if (!(await ownDeal(user.id, dealId))) return;
+  if (!(await canEditDeal(user, dealId))) return;
 
   const assumptions = JSON.parse(String(formData.get("assumptions") ?? "{}")) as MfAssumptions;
   const costProgram = JSON.parse(String(formData.get("cost_program") ?? "{}")) as CostProgram;
@@ -96,7 +108,7 @@ export async function saveDeal(formData: FormData) {
       line_details = ${JSON.stringify(lineDetails)}::jsonb,
       notes = ${str(formData.get("notes"))},
       updated_at = now()
-    where id = ${dealId} and owner_id = ${user.id}`;
+    where id = ${dealId}`;
 
   // Replace the mix wholesale. Comp quantities don't hang off unit types, so
   // there's nothing to cascade — this is safe and keeps deletes trivial.
@@ -133,7 +145,9 @@ export type RefineState = { refinement?: ParkingRefinement; error?: string } | n
 export async function refineParkingAction(_prev: RefineState, formData: FormData): Promise<RefineState> {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
-  const loaded = await loadMfDeal(user.id, dealId);
+  // Spends an AI call, and only an editor could apply the result — gate it.
+  if (!(await canEditDeal(user, dealId))) return { error: "Not allowed to edit this deal." };
+  const loaded = await loadMfDeal(user, dealId);
   if (!loaded) return { error: "Deal not found." };
 
   const { deal, units } = loaded;
@@ -156,7 +170,10 @@ export async function searchComps(formData: FormData) {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
   const kind = (String(formData.get("kind")) === "sale" ? "sale" : "rent") as CompKind;
-  const loaded = await loadMfDeal(user.id, dealId);
+  // This action WRITES comp rows and spends an AI call, so read access is not
+  // enough — a viewer must not be able to add rows to someone else's deal.
+  if (!(await canEditDeal(user, dealId))) return;
+  const loaded = await loadMfDeal(user, dealId);
   if (!loaded) return;
 
   const { deal, units } = loaded;
@@ -172,7 +189,7 @@ export async function searchComps(formData: FormData) {
   });
 
   if (!result.ok) {
-    await sql`update feasible.mf_deals set notes = ${`Comp search: ${result.error}`} where id = ${dealId} and owner_id = ${user.id}`;
+    await sql`update feasible.mf_deals set notes = ${`Comp search: ${result.error}`} where id = ${dealId}`;
     revalidatePath(`/multifamily/${dealId}`);
     return;
   }
@@ -192,7 +209,7 @@ export async function confirmComp(formData: FormData) {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
   const compId = String(formData.get("compId"));
-  if (!(await ownDeal(user.id, dealId))) return;
+  if (!(await canEditDeal(user, dealId))) return;
   await sql`update feasible.mf_comps set confirmed = true where id = ${compId} and deal_id = ${dealId}`;
   revalidatePath(`/multifamily/${dealId}`);
 }
@@ -201,7 +218,7 @@ export async function deleteComp(formData: FormData) {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
   const compId = String(formData.get("compId"));
-  if (!(await ownDeal(user.id, dealId))) return;
+  if (!(await canEditDeal(user, dealId))) return;
   await sql`delete from feasible.mf_comps where id = ${compId} and deal_id = ${dealId}`;
   revalidatePath(`/multifamily/${dealId}`);
 }
@@ -215,7 +232,7 @@ export async function applyCompToMix(formData: FormData) {
   const user = await requireUser();
   const dealId = String(formData.get("dealId"));
   const compId = String(formData.get("compId"));
-  if (!(await ownDeal(user.id, dealId))) return;
+  if (!(await canEditDeal(user, dealId))) return;
 
   const [comp] = await sql<{ kind: "rent" | "sale"; detail: unknown }[]>`
     select kind, detail from feasible.mf_comps where id = ${compId} and deal_id = ${dealId}`;
@@ -243,5 +260,53 @@ export async function applyCompToMix(formData: FormData) {
                 where deal_id = ${dealId} and tier = 'market' and lower(trim(label)) = ${norm(line.label)}`;
     }
   }
+  revalidatePath(`/multifamily/${dealId}`);
+}
+
+// ---------------------------------------------------------------------------
+// SHARING — owner only.
+//
+// Every action here calls requireDealOwner first. A collaborator, even an
+// editor, must never be able to add another collaborator, change a role, or
+// remove themselves-and-others — otherwise "shared with one colleague" quietly
+// becomes "shared with whoever they chose."
+// ---------------------------------------------------------------------------
+
+export type ShareState = { error?: string; ok?: string } | null;
+
+export async function shareDeal(_prev: ShareState, formData: FormData): Promise<ShareState> {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const role = String(formData.get("role")) === "editor" ? "editor" : "viewer";
+
+  try {
+    await requireDealOwner(user, dealId);
+  } catch {
+    return { error: "Only the deal's owner can share it." };
+  }
+
+  if (!email) return { error: "Enter an email address." };
+  // The Workspace gate, applied at invite time as well as at sign-in. An outside
+  // address could never hold a session anyway, so accepting the grant would just
+  // leave a row that looks like access and isn't.
+  if (!emailAllowed(email)) {
+    return { error: "Only @brookegrouprealestate.com accounts can be given access." };
+  }
+  if (email === user.email?.trim().toLowerCase()) {
+    return { error: "You already own this deal." };
+  }
+
+  await grantAccess(dealId, email, role, user.id);
+  revalidatePath(`/multifamily/${dealId}`);
+  return { ok: `${email} can now ${role === "editor" ? "view and edit" : "view"} this deal.` };
+}
+
+export async function unshareDeal(formData: FormData) {
+  const user = await requireUser();
+  const dealId = String(formData.get("dealId"));
+  const accessId = String(formData.get("accessId"));
+  await requireDealOwner(user, dealId);
+  await revokeAccess(dealId, accessId);
   revalidatePath(`/multifamily/${dealId}`);
 }

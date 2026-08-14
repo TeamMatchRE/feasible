@@ -11,7 +11,7 @@ const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 
 export default async function MultiFamilyPage() {
   const user = await requireUser();
-  const deals = await listMfDeals(user.id);
+  const deals = await listMfDeals(user);
 
   return (
     <Shell>
@@ -66,6 +66,14 @@ export default async function MultiFamilyPage() {
                     <Link href={`/multifamily/${d.id}`} className="font-medium text-ink underline-offset-2 hover:underline">
                       {d.name}
                     </Link>
+                    {/* Shared deals sit in the same list as your own, labelled — a
+                        separate "shared with me" section would hide a deal you are
+                        actively working on. */}
+                    {d.shared_by && (
+                      <span className="mt-0.5 block text-[11px] text-muted">
+                        Shared by {d.shared_by} · {d.role === "editor" ? "can edit" : "view only"}
+                      </span>
+                    )}
                   </td>
                   <td className="p-3 text-muted">{d.city ?? "—"}</td>
                   <td className="p-3 text-right text-muted">{d.units}</td>

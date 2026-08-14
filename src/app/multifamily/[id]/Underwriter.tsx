@@ -176,7 +176,13 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   );
 }
 
-export default function Underwriter({ initial }: { initial: DealState }) {
+/**
+ * `canEdit` is false when the deal was shared with you as a viewer. It hides the
+ * save control and labels the page read-only. The real enforcement is on the
+ * server — saveDeal re-checks write access — so this is about not offering an
+ * action that would be refused, not about preventing one.
+ */
+export default function Underwriter({ initial, canEdit = true }: { initial: DealState; canEdit?: boolean }) {
   const [d, setD] = useState<DealState>(initial);
   const [tab, setTab] = useState<"underwriting" | "costs">("underwriting");
   const [openLine, setOpenLine] = useState<string | null>(null);
@@ -757,10 +763,19 @@ export default function Underwriter({ initial }: { initial: DealState }) {
         <input type="hidden" name="cost_program" value={JSON.stringify(d.costProgram)} />
         <input type="hidden" name="line_details" value={JSON.stringify(d.lineDetails)} />
         <input type="hidden" name="units" value={JSON.stringify(d.units)} />
-        <SubmitButton className="rounded bg-ink px-4 py-2 text-sm text-white hover:bg-ink/90">Save deal</SubmitButton>
-        <span className="text-xs text-muted">
-          Everything above recomputes as you type — saving persists it and lets the comp tools read the mix.
-        </span>
+        {canEdit ? (
+          <>
+            <SubmitButton className="rounded bg-ink px-4 py-2 text-sm text-white hover:bg-ink/90">Save deal</SubmitButton>
+            <span className="text-xs text-muted">
+              Everything above recomputes as you type — saving persists it and lets the comp tools read the mix.
+            </span>
+          </>
+        ) : (
+          <span className="text-xs text-muted">
+            You have view access to this deal. Change anything above to explore the numbers — it
+            recomputes live, but nothing you change here is saved.
+          </span>
+        )}
       </form>
     </div>
   );

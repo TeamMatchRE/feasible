@@ -5,15 +5,22 @@ import { requireUser } from "@/lib/session";
 import { loadMfDeal, DEFAULT_ASSUMPTIONS } from "@/lib/mf-queries";
 import Underwriter from "./Underwriter";
 import CompsPanel from "./CompsPanel";
+import SharePanel from "./SharePanel";
+import { canWrite, canManage, listCollaborators, dealOwner } from "@/lib/mf-access";
 
 export const dynamic = "force-dynamic";
 
 export default async function MfDealPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const user = await requireUser();
-  const loaded = await loadMfDeal(user.id, id);
+  const loaded = await loadMfDeal(user, id);
   if (!loaded) notFound();
-  const { deal, units, comps } = loaded;
+  const { deal, units, comps, role } = loaded;
+
+  // Only the owner manages sharing, so only the owner pays for these queries.
+  const collaborators = canManage(role) ? await listCollaborators(id) : [];
+  const owner = role === "owner" ? null : await dealOwner(id);
+  const editable = canWrite(role);
 
   // postgres-js returns numerics as strings; normalize once here so the client
   // component never has to wonder which fields are numbers.
@@ -62,12 +69,19 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
           <p className="mt-1 text-sm text-muted">
             {[deal.address, deal.city, deal.state].filter(Boolean).join(", ") || "No address set"}
           </p>
+          {owner && (
+            <p className="mt-1 text-xs text-muted">
+              Shared with you by {owner.full_name ?? owner.email ?? "the owner"} ·{" "}
+              {editable ? "you can edit" : "view only"}
+            </p>
+          )}
         </div>
+        {canManage(role) && <SharePanel dealId={deal.id} collaborators={collaborators} />}
       </div>
 
-      <Underwriter initial={initial} />
+      <Underwriter initial={initial} canEdit={editable} />
 
-      <CompsPanel dealId={deal.id} comps={comps} />
+      <CompsPanel dealId={deal.id} comps={comps} canEdit={editable} />
     </Shell>
   );
 }

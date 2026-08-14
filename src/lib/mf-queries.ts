@@ -2,6 +2,8 @@ import "server-only";
 import { sql } from "@/db";
 import type { MultiFamilyInputs, UnitTypeInput, LineDetails } from "@/lib/multifamily";
 import { DEFAULT_COST_PROGRAM, type CostProgram } from "@/lib/mf-costs";
+import { dealRole, canRead, type DealRole } from "@/lib/mf-access";
+import type { SessionUser } from "@/lib/session";
 
 /**
  * Storage for multi-family deals. The engine's inputs are split three ways:
@@ -145,14 +147,31 @@ export type MfDealSummary = {
   units: number;
   total_project_cost: number;
   updated_at: string;
+  /** Null when you own it; the owner's name when it was shared with you. */
+  shared_by: string | null;
+  role: "owner" | "editor" | "viewer";
 };
 
-export async function listMfDeals(ownerId: string): Promise<MfDealSummary[]> {
+/**
+ * Every deal the caller can open — the ones they own, plus the ones shared with
+ * them by email. `shared_by` is null on their own deals and names the owner on
+ * the rest, so the list can label them without a second query.
+ */
+export async function listMfDeals(user: { id: string; email: string | null }): Promise<MfDealSummary[]> {
+  const email = user.email?.trim().toLowerCase() ?? null;
   return sql<MfDealSummary[]>`
     select d.id, d.name, d.city, d.total_project_cost, d.updated_at,
-           coalesce((select sum(u.unit_count) from feasible.mf_unit_types u where u.deal_id = d.id), 0)::int as units
+           coalesce((select sum(u.unit_count) from feasible.mf_unit_types u where u.deal_id = d.id), 0)::int as units,
+           case when d.owner_id = ${user.id} then null
+                else coalesce(p.full_name, p.email) end as shared_by,
+           case when d.owner_id = ${user.id} then 'owner' else a.role end as role
     from feasible.mf_deals d
-    where d.owner_id = ${ownerId}
+    left join feasible.mf_deal_access a
+      on a.deal_id = d.id
+     and ${email}::text is not null
+     and lower(a.email) = ${email}
+    left join feasible.profiles p on p.id = d.owner_id
+    where d.owner_id = ${user.id} or a.id is not null
     order by d.updated_at desc`;
 }
 
@@ -173,16 +192,27 @@ export async function createMfDeal(ownerId: string, name: string, city: string |
   return row.id;
 }
 
+/**
+ * Load a deal the caller is allowed to see.
+ *
+ * Access is resolved by `dealRole` (src/lib/mf-access.ts) rather than an
+ * owner_id comparison here, because a deal can now be shared. The resolved role
+ * comes back with the deal so the page can render read-only for a viewer — and
+ * so no caller has to ask a second time and risk asking differently.
+ */
 export async function loadMfDeal(
-  ownerId: string,
+  user: SessionUser,
   id: string,
-): Promise<{ deal: MfDeal; units: MfUnitType[]; comps: MfComp[] } | null> {
+): Promise<{ deal: MfDeal; units: MfUnitType[]; comps: MfComp[]; role: DealRole } | null> {
+  const role = await dealRole(user, id);
+  if (!canRead(role)) return null;
+
   const [deal] = await sql<MfDeal[]>`
     select id, name, address, city, state, gross_sqft, commercial_sqft, height_stories,
            garage_spaces, surface_spaces, storage_spaces,
            total_project_cost, assumptions, cost_program, line_details, notes, updated_at
     from feasible.mf_deals
-    where id = ${id} and owner_id = ${ownerId}`;
+    where id = ${id}`;
   if (!deal) return null;
 
   const units = await sql<MfUnitType[]>`
@@ -225,6 +255,7 @@ export async function loadMfDeal(
     },
     units,
     comps: comps.map((c) => ({ ...c, detail: asJson<MfComp["detail"]>(c.detail, []) })),
+    role: role as DealRole,
   };
 }
 
