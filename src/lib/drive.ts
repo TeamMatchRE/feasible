@@ -96,18 +96,34 @@ async function call<T>(
 
   if (!res.ok) {
     const body = await res.text();
+
     // 404 on Drive usually means "you can't see it", not "it doesn't exist" —
     // saying so saves a long hunt for a folder that was simply never shared.
     if (res.status === 404) {
       return { ok: false, error: "Not found, or not shared with your Google account." };
     }
+
+    // Google's own 403 message is better than anything we could write: for a
+    // disabled API it names the project AND gives the one-click enable URL.
+    // Guessing at the cause here would replace an actionable link with a hunch.
+    const googleMessage = (() => {
+      try {
+        const j = JSON.parse(body) as { error?: { message?: string } };
+        return j.error?.message ?? null;
+      } catch {
+        return null;
+      }
+    })();
+
     if (res.status === 403) {
       return {
         ok: false,
-        error: "Google refused the request — the Drive API may not be enabled on the OAuth project.",
+        error:
+          googleMessage ??
+          "Google refused the request — the Drive API may not be enabled on the OAuth project.",
       };
     }
-    return { ok: false, error: `Drive returned ${res.status}. ${body.slice(0, 200)}` };
+    return { ok: false, error: googleMessage ?? `Drive returned ${res.status}. ${body.slice(0, 200)}` };
   }
   return { ok: true, data: (await res.json()) as T };
 }
