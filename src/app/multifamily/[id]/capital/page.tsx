@@ -8,6 +8,8 @@ import { raiseProgress } from "@/lib/capital";
 import { sql } from "@/db";
 import ProjectNav from "../ProjectNav";
 import InvestorEditor from "./InvestorEditor";
+import InvestorFiles from "./InvestorFiles";
+import { surnameOf } from "@/lib/investor-drive";
 
 export const dynamic = "force-dynamic";
 
@@ -141,7 +143,16 @@ export default async function CapitalPage({ params }: { params: Promise<{ id: st
                     <td className="p-3 text-xs capitalize text-muted">{inv.status.replace(/_/g, " ")}</td>
                     {editable && (
                       <td className="p-3 text-right">
-                        <InvestorEditor projectId={id} investor={inv} />
+                        <div className="flex flex-col items-end gap-1">
+                          <InvestorEditor projectId={id} investor={inv} />
+                          <InvestorFiles
+                            projectId={id}
+                            investmentId={inv.investment_id}
+                            investorName={inv.name}
+                            surname={surnameOf(inv.name)}
+                            documents={inv.documents}
+                          />
+                        </div>
                       </td>
                     )}
                   </tr>
