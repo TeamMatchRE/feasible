@@ -170,6 +170,50 @@ export async function accessTokenFor(profileId: string): Promise<
 }
 
 /**
+ * Is the client_id / client_secret PAIR valid — without a consent round trip?
+ *
+ * Deliberately sends a code we know is bad, and reads which way Google refuses:
+ *
+ *   invalid_client  → the secret does not belong to this client id. The pair is
+ *                     wrong, and no amount of re-consenting will fix it.
+ *   invalid_grant   → the pair authenticated fine and Google got as far as
+ *                     rejecting the fake code. That is a PASS.
+ *
+ * This exists because the alternative is a four-step retry loop — edit the
+ * variable, redeploy, sign in, approve — to learn one bit of information. The
+ * secret is never read, logged, or returned; only Google's verdict on it is.
+ */
+export async function testClientCredentials(): Promise<
+  { ok: true } | { ok: false; error: string }
+> {
+  if (!googleConfigured()) return { ok: false, error: "Client ID or secret is missing." };
+
+  const json = await tokenRequest({
+    code: "feasible-credential-probe-not-a-real-code",
+    client_id: clientId()!,
+    client_secret: clientSecret()!,
+    redirect_uri: redirectUri(),
+    grant_type: "authorization_code",
+  });
+
+  if (json.error === "invalid_grant") return { ok: true };
+
+  if (json.error === "invalid_client") {
+    return {
+      ok: false,
+      error:
+        "Google rejected the client ID and secret together. The secret in Vercel doesn't belong to client " +
+        `${clientId()!.split("-")[0]}… — replace GOOGLE_CLIENT_SECRET with the secret from that same client.`,
+    };
+  }
+
+  return {
+    ok: false,
+    error: json.error_description ?? json.error ?? "Google returned an unexpected response.",
+  };
+}
+
+/**
  * What the setup actually needs, reported back to the UI so a misconfiguration
  * is diagnosable without reading Vercel's env list.
  */

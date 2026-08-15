@@ -1,11 +1,30 @@
 import Link from "next/link";
 import Shell from "@/components/Shell";
 import { requireUser } from "@/lib/session";
-import { getConnection, oauthDiagnostics, disconnect } from "@/lib/google-oauth";
+import {
+  getConnection,
+  oauthDiagnostics,
+  disconnect,
+  testClientCredentials,
+} from "@/lib/google-oauth";
 import { SubmitButton } from "@/components/SubmitButton";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
+
+async function probeCredentials() {
+  "use server";
+  await requireUser();
+  const res = await testClientCredentials();
+  // Round-trips through the URL so the result survives the redirect, and so the
+  // page stays a plain server component with no client state to manage.
+  redirect(
+    res.ok
+      ? "/settings/google?probe=ok"
+      : `/settings/google?probe=fail&reason=${encodeURIComponent(res.error)}`,
+  );
+}
 
 async function disconnectGoogle() {
   "use server";
@@ -25,7 +44,7 @@ async function disconnectGoogle() {
 export default async function GoogleSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ google?: string; reason?: string }>;
+  searchParams: Promise<{ google?: string; reason?: string; probe?: string }>;
 }) {
   const user = await requireUser();
   const sp = await searchParams;
@@ -51,6 +70,18 @@ export default async function GoogleSettingsPage({
       {sp.google === "error" && (
         <p className="mb-4 rounded border border-line bg-white px-4 py-3 text-sm text-red-600">
           Couldn&rsquo;t connect: {sp.reason ?? "unknown error"}
+        </p>
+      )}
+
+      {sp.probe === "ok" && (
+        <p className="mb-4 rounded border border-line bg-white px-4 py-3 text-sm text-ink">
+          Client ID and secret authenticate correctly. If connecting still fails, the problem is
+          elsewhere.
+        </p>
+      )}
+      {sp.probe === "fail" && (
+        <p className="mb-4 rounded border border-line bg-white px-4 py-3 text-sm text-red-600">
+          {sp.reason ?? "The credentials were rejected."}
         </p>
       )}
 
@@ -123,6 +154,18 @@ export default async function GoogleSettingsPage({
             <dd className="break-all font-mono text-ink">{diag.scopes}</dd>
           </div>
         </dl>
+
+        <form action={probeCredentials} className="mt-4 border-t border-line pt-3">
+          <SubmitButton
+            pendingLabel="Asking Google…"
+            className="rounded border border-line px-3 py-1.5 text-xs text-ink hover:bg-line/30"
+          >
+            Test the client ID and secret
+          </SubmitButton>
+          <span className="ml-2 text-[11px] text-muted">
+            Checks the pair against Google without signing in or granting anything.
+          </span>
+        </form>
 
         <p className="mt-4 text-[11px] uppercase tracking-wide text-muted">In Google Cloud console</p>
         <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-xs leading-relaxed text-muted">
