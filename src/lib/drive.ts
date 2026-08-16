@@ -253,3 +253,74 @@ export const prettySize = (bytes: number | null): string => {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
+
+// ---------------------------------------------------------------------------
+// Reading a document's CONTENT
+// ---------------------------------------------------------------------------
+
+/**
+ * Google-native files (Docs, Sheets) have no bytes to download — they must be
+ * EXPORTED to a concrete format. Sheets export to CSV, Docs to plain text.
+ *
+ * ⚠️ A Sheets CSV export returns the FIRST TAB ONLY. That is a real limit, not
+ * an oversight: pulling every tab needs the Sheets API, which is a separate API
+ * to enable and a separate scope. Callers should say so rather than implying the
+ * whole workbook was read.
+ */
+export const GOOGLE_SHEET = "application/vnd.google-apps.spreadsheet";
+export const GOOGLE_DOC = "application/vnd.google-apps.document";
+
+export function exportMimeFor(mimeType: string): string | null {
+  if (mimeType === GOOGLE_SHEET) return "text/csv";
+  if (mimeType === GOOGLE_DOC) return "text/plain";
+  return null;
+}
+
+/** True for things worth sending to a model: text-ish, or a PDF. */
+export function isReadable(mimeType: string): boolean {
+  return (
+    exportMimeFor(mimeType) != null ||
+    mimeType === "application/pdf" ||
+    mimeType.startsWith("text/")
+  );
+}
+
+/** Text of a Google-native file, or of a plain text file. */
+export async function readTextFile(
+  profileId: string,
+  fileId: string,
+  mimeType: string,
+): Promise<DriveResult<string>> {
+  const tok = await accessTokenFor(profileId);
+  if (!tok.ok) return { ok: false, error: tok.error, needsReconnect: tok.needsReconnect };
+
+  const exportMime = exportMimeFor(mimeType);
+  const url = exportMime
+    ? `${API}/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`
+    : `${API}/files/${fileId}?alt=media&supportsAllDrives=true`;
+
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${tok.token}` }, cache: "no-store" });
+  if (!res.ok) {
+    const body = await res.text();
+    return { ok: false, error: `Couldn't read that file (${res.status}). ${body.slice(0, 160)}` };
+  }
+  return { ok: true, data: await res.text() };
+}
+
+/** Raw bytes — used for PDFs, which go to the model as a document block. */
+export async function readBinaryFile(
+  profileId: string,
+  fileId: string,
+): Promise<DriveResult<{ base64: string; bytes: number }>> {
+  const tok = await accessTokenFor(profileId);
+  if (!tok.ok) return { ok: false, error: tok.error, needsReconnect: tok.needsReconnect };
+
+  const res = await fetch(`${API}/files/${fileId}?alt=media&supportsAllDrives=true`, {
+    headers: { Authorization: `Bearer ${tok.token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) return { ok: false, error: `Couldn't download that file (${res.status}).` };
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { ok: true, data: { base64: buf.toString("base64"), bytes: buf.length } };
+}
