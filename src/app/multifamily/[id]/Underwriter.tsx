@@ -53,6 +53,7 @@ export type DealState = {
   address: string;
   city: string;
   state: string;
+  postalCode: string;
   grossSqft: number;
   commercialSqft: number;
   heightStories: number;
@@ -472,6 +473,18 @@ export default function Underwriter({ initial, canEdit = true }: { initial: Deal
               <span className="block text-xs uppercase tracking-wide text-muted">City</span>
               <input className={`mt-1 ${inputCls}`} value={d.city} onChange={(e) => set("city", e.target.value)} />
             </label>
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-muted">State</span>
+              <input className={`mt-1 ${inputCls}`} value={d.state} onChange={(e) => set("state", e.target.value)} />
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-muted">ZIP</span>
+              <input
+                className={`mt-1 ${inputCls}`}
+                value={d.postalCode}
+                onChange={(e) => set("postalCode", e.target.value)}
+              />
+            </label>
             <div className="col-span-2 rounded border border-line bg-black/[0.02] p-2">
               <p className="text-xs uppercase tracking-wide text-muted">Total project cost</p>
               <p className="text-lg font-semibold text-ink">{money(build.effectiveTotal)}</p>
@@ -749,6 +762,7 @@ export default function Underwriter({ initial, canEdit = true }: { initial: Deal
         <input type="hidden" name="address" value={d.address} />
         <input type="hidden" name="city" value={d.city} />
         <input type="hidden" name="state" value={d.state} />
+        <input type="hidden" name="postal_code" value={d.postalCode} />
         <input type="hidden" name="gross_sqft" value={d.grossSqft} />
         <input type="hidden" name="commercial_sqft" value={d.commercialSqft} />
         <input type="hidden" name="height_stories" value={d.heightStories} />

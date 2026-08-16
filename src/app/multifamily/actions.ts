@@ -108,6 +108,7 @@ export async function saveDeal(formData: FormData) {
       address = ${str(formData.get("address"))},
       city = ${str(formData.get("city"))},
       state = ${str(formData.get("state")) ?? "CT"},
+      postal_code = ${str(formData.get("postal_code"))},
       notes = ${str(formData.get("notes"))},
       updated_at = now()
     where id = ${dealId}`;

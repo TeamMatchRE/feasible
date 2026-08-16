@@ -34,6 +34,7 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
     address: deal.address ?? "",
     city: deal.city ?? "",
     state: deal.state ?? "CT",
+    postalCode: deal.postal_code ?? "",
     grossSqft: Number(deal.gross_sqft ?? 0),
     commercialSqft: Number(deal.commercial_sqft ?? 0),
     heightStories: Number(deal.height_stories ?? 0),

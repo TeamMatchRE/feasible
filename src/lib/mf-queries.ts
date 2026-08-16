@@ -44,6 +44,7 @@ export type MfDeal = {
   address: string | null;
   city: string | null;
   state: string | null;
+  postal_code: string | null;
   gross_sqft: number | null;
   commercial_sqft: number | null;
   height_stories: number | null;
@@ -237,8 +238,9 @@ export async function loadMfDeal(
   if (!canRead(role)) return null;
 
   const [row] = await sql<{ id: string; name: string; address: string | null; city: string | null;
-                           state: string | null; notes: string | null; updated_at: string }[]>`
-    select id, name, address, city, state, notes, updated_at
+                           state: string | null; postal_code: string | null; notes: string | null;
+                           updated_at: string }[]>`
+    select id, name, address, city, state, postal_code, notes, updated_at
     from feasible.mf_deals
     where id = ${id}`;
   if (!row) return null;
