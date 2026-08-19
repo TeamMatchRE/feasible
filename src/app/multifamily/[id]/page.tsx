@@ -10,6 +10,8 @@ import { canWrite, canManage, listCollaborators, dealOwner } from "@/lib/mf-acce
 import ScenarioBar from "./ScenarioBar";
 import ProjectNav from "./ProjectNav";
 import { listScenarios } from "@/lib/mf-scenarios";
+import { loadLatestLeadRead } from "@/lib/hpd-queries";
+import LeadSummary from "./LeadSummary";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,10 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
   const owner = role === "owner" ? null : await dealOwner(id);
   const editable = canWrite(role);
   const scenarios = await listScenarios(id);
+  // Who is asking about this project. Null until someone refreshes it on the
+  // Leads tab — the profile shows the last reading rather than calling the CRM
+  // on every page load.
+  const leadRead = await loadLatestLeadRead(id);
 
   // postgres-js returns numerics as strings; normalize once here so the client
   // component never has to wonder which fields are numbers.
@@ -96,6 +102,12 @@ export default async function MfDealPage({ params }: { params: Promise<{ id: str
       {/* key forces a fresh editor when the scenario changes — otherwise React
           keeps the old useState(initial) and shows the previous case's numbers. */}
       <Underwriter key={scenarioId} initial={initial} canEdit={editable} />
+
+      {leadRead && (
+        <div className="mt-6">
+          <LeadSummary read={leadRead} projectId={deal.id} compact />
+        </div>
+      )}
 
       <CompsPanel dealId={deal.id} comps={comps} canEdit={editable} />
     </Shell>

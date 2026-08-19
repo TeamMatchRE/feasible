@@ -11,6 +11,7 @@ import Link from "next/link";
  */
 const TABS = [
   { href: "", label: "Underwriting" },
+  { href: "/leads", label: "Leads" },
   { href: "/capital", label: "Capital" },
   { href: "/lots", label: "Lots" },
   { href: "/updates", label: "Investor updates" },

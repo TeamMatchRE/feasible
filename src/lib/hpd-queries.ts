@@ -3,6 +3,9 @@ import { sql } from "@/db";
 import { asJson } from "@/lib/mf-queries";
 import type { Brand } from "@/lib/investor-update-ai";
 import type { InvestmentLike, LotLike } from "@/lib/capital";
+import type { LeadStats } from "@/lib/leads";
+import { EMPTY_LEAD_STATS } from "@/lib/leads";
+import type { LeadTheme, LeadAttention } from "@/lib/lead-summary-ai";
 
 /**
  * Reads for the company / capital / lots side of a project.
@@ -194,4 +197,77 @@ export async function loadUpdate(id: string, projectId: string): Promise<UpdateR
     recipients: asJson<UpdateRow["recipients"]>(r.recipients, []),
     delivery: asJson<UpdateRow["delivery"]>(r.delivery, []),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Lead reads — the project's Follow Up Boss pipeline, as of a moment
+// ---------------------------------------------------------------------------
+
+export type LeadReadRow = {
+  id: string;
+  tag: string;
+  lead_count: number;
+  stats: LeadStats;
+  headline: string | null;
+  summary: string | null;
+  themes: LeadTheme[];
+  attention: LeadAttention[];
+  model: string | null;
+  created_at: string;
+  /** Name of whoever pressed refresh, when they still have a profile row. */
+  generated_by_name: string | null;
+};
+
+const LEAD_READ_COLUMNS = sql`
+  r.id, r.tag, r.lead_count, r.stats, r.headline, r.summary, r.themes,
+  r.attention, r.model, r.created_at,
+  coalesce(p.full_name, p.email) as generated_by_name`;
+
+const toLeadRead = (r: Record<string, unknown>): LeadReadRow => ({
+  ...(r as unknown as LeadReadRow),
+  lead_count: Number(r.lead_count ?? 0),
+  stats: asJson<LeadStats>(r.stats, EMPTY_LEAD_STATS),
+  themes: asJson<LeadTheme[]>(r.themes, []),
+  attention: asJson<LeadAttention[]>(r.attention, []),
+});
+
+/** The most recent read, which is what the project's profile shows. */
+export async function loadLatestLeadRead(projectId: string): Promise<LeadReadRow | null> {
+  const [row] = await sql<Record<string, unknown>[]>`
+    select ${LEAD_READ_COLUMNS}
+    from feasible.project_lead_reads r
+    left join feasible.profiles p on p.id = r.generated_by
+    where r.project_id = ${projectId}
+    order by r.created_at desc
+    limit 1`;
+  return row ? toLeadRead(row) : null;
+}
+
+/** Earlier reads, so "what did the pipeline look like last month" is answerable. */
+export async function listLeadReads(projectId: string, limit = 12): Promise<LeadReadRow[]> {
+  const rows = await sql<Record<string, unknown>[]>`
+    select ${LEAD_READ_COLUMNS}
+    from feasible.project_lead_reads r
+    left join feasible.profiles p on p.id = r.generated_by
+    where r.project_id = ${projectId}
+    order by r.created_at desc
+    limit ${limit}`;
+  return rows.map(toLeadRead);
+}
+
+/**
+ * The tag whose people are this project's leads.
+ *
+ * Falls back to the project's own name, because that is what the tag already
+ * is in practice — the community is called The Enclave and so is the tag. The
+ * column exists for the day the two drift apart.
+ */
+export async function leadTagForProject(
+  projectId: string,
+): Promise<{ name: string; tag: string; explicit: boolean } | null> {
+  const [row] = await sql<{ name: string; fub_lead_tag: string | null }[]>`
+    select name, fub_lead_tag from feasible.mf_deals where id = ${projectId}`;
+  if (!row) return null;
+  const explicit = !!row.fub_lead_tag?.trim();
+  return { name: row.name, tag: (explicit ? row.fub_lead_tag! : row.name).trim(), explicit };
 }
